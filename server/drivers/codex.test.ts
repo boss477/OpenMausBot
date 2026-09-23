@@ -5,7 +5,7 @@
 //
 // The fake is a shebang script — the same constraint codex.cmd itself
 // hits on Windows. resolveCliSpawn covers both, so these run everywhere.
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -116,6 +116,7 @@ describe("CodexDriver turns (fake app-server)", () => {
 
   afterEach(async () => {
     delete process.env.FAKE_CODEX_MODE;
+    delete process.env.FAKE_CODEX_APPROVAL_REQUEST;
     delete process.env.FAKE_CODEX_DUMP;
     delete process.env.FAKE_CODEX_ASK_HOLD;
     delete process.env.FAKE_CODEX_TRANSIENTS;
@@ -1202,9 +1203,10 @@ describe("CodexDriver turns (fake app-server)", () => {
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CODEX_DUMP = dump;
 
-    await instance.adapter.sendTurn({ threadId: "t-approve", text: "clean up" });
+    await instance.adapter.sendTurn({ threadId: "t-approve", text: "clean up", cwd: scratch });
     const opened = await recorder.until((e) => e.type === "request.opened");
     expect(opened).toMatchObject({ requestType: "permission", tool: "shell", summary: "rm -rf scratch" });
+    expect(opened).toHaveProperty("command", { command: "rm -rf scratch", cwd: realpathSync(scratch) });
 
     await instance.adapter.respondToRequest("t-approve", opened.requestId!, { behavior: "allow" });
     const resolved = await recorder.until((e) => e.type === "request.resolved");
@@ -1213,6 +1215,43 @@ describe("CodexDriver turns (fake app-server)", () => {
     await recorder.until((e) => e.type === "turn.completed");
     // legacy method name → legacy decision vocabulary
     expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({ decision: "approved" });
+  });
+
+  it.each([
+    { name: "complete native command", method: "item/commandExecution/requestApproval", params: { command: `printf '  ${"complete input ".repeat(30)}'\n  pwd  ` }, descriptor: true },
+    { name: "shell with additional permissions", method: "item/commandExecution/requestApproval", params: { command: "pwd", additionalPermissions: { network: { enabled: true } } }, descriptor: true },
+    { name: "shell with network approval", method: "item/commandExecution/requestApproval", params: { command: "pwd", networkApprovalContext: { host: "example.test", protocol: "https" } }, descriptor: true },
+    { name: "argv command", method: "execCommandApproval", params: { command: ["echo", "do not join argv"] }, descriptor: false },
+    { name: "display reason only", method: "item/commandExecution/requestApproval", params: { reason: "echo display only" }, descriptor: false },
+    { name: "relative directory", method: "item/commandExecution/requestApproval", params: { command: "pwd", cwd: "unknown-relative-directory" }, descriptor: false },
+    { name: "file edit with command property", method: "item/fileChange/requestApproval", params: { command: "echo not a shell approval" }, descriptor: false },
+    { name: "additional permission", method: "item/permissions/requestApproval", params: { command: "echo not a shell approval", permissions: { network: { enabled: true } } }, descriptor: false },
+  ])("emits a command descriptor only for trustworthy shell input: $name", async ({ method, params, descriptor }) => {
+    await create({ mode: "approval" });
+    const effectiveCwd = join(scratch, "effective-command-directory");
+    const nativeParams = { cwd: effectiveCwd, ...params };
+    process.env.FAKE_CODEX_APPROVAL_REQUEST = JSON.stringify({ method, params: nativeParams });
+    await instance.adapter.sendTurn({ threadId: "t-native-command-descriptor", text: "go", cwd: scratch });
+    const opened = await recorder.until((event) => event.type === "request.opened");
+    expect(opened).toHaveProperty("command", descriptor ? { command: params.command, cwd: effectiveCwd } : undefined);
+    if (method === "item/permissions/requestApproval" || params.additionalPermissions || params.networkApprovalContext) {
+      expect(opened).toHaveProperty("requiresExplicitApproval", true);
+    }
+    await instance.adapter.respondToRequest("t-native-command-descriptor", opened.requestId!, { behavior: "deny" });
+    await recorder.until((event) => event.type === "turn.completed");
+  });
+
+  it("does not infer a helper's working directory from the parent turn", async () => {
+    await create({ mode: "approval" });
+    process.env.FAKE_CODEX_APPROVAL_REQUEST = JSON.stringify({
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "helper-thread", command: "pwd" },
+    });
+    await instance.adapter.sendTurn({ threadId: "t-helper-command-descriptor", text: "go", cwd: scratch });
+    const opened = await recorder.until((event) => event.type === "request.opened");
+    expect(opened).toHaveProperty("command", undefined);
+    await instance.adapter.respondToRequest("t-helper-command-descriptor", opened.requestId!, { behavior: "deny" });
+    await recorder.until((event) => event.type === "turn.completed");
   });
 
   it("answers a single-question ask and keeps its reply scoped to that question", async () => {
@@ -1229,6 +1268,7 @@ describe("CodexDriver turns (fake app-server)", () => {
       // six options offered; the card keeps its five-row ceiling
       choices: ["Yes", "No", "Maybe", "Later", "Soon"],
     });
+    expect(opened).toHaveProperty("command", undefined);
 
     await instance.adapter.respondToRequest("t-question-single", opened.requestId!, { behavior: "answer", message: "Yes" });
     const resolved = await recorder.until((e) => e.type === "request.resolved");

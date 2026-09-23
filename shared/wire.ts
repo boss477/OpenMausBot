@@ -9,6 +9,7 @@
  * fails compilation until it is either declared here or explicitly listed
  * as server-private. */
 import type { ApprovalMode } from "./approval-mode.ts";
+import type { CommandAllowlistCandidate } from "./command-allowlist.ts";
 import type { TurnDigest } from "./digest.ts";
 import type { BotAvatarCrop } from "./bot-avatar.ts";
 import type { MascotBodyId } from "./mascot-bodies.ts";
@@ -417,6 +418,8 @@ export interface OptionCardData {
   allowKey?: string;
   /** the provider can remember an allow for the rest of its session. */
   allowSession?: boolean;
+  /** Exact native command offered for an owner/admin to remember. */
+  commandAllowlist?: CommandAllowlistCandidate;
   /** Local actions never share remembered grants with cloud/tool approvals. */
   approvalScope?: "local-computer";
   /** A durable chat-created routine proposal. */

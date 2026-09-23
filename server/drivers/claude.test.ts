@@ -6,7 +6,7 @@
 // These used to be POSIX-only: the fake CLI is a shebang script Windows
 // cannot exec, and the broker is a unix socket. Both now go through
 // resolveCliSpawn / permissionSocketPath, so they run everywhere.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -2126,6 +2126,35 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await instance.adapter.sendTurn({ threadId: "t-review-ask", text: "go", approvalMode: "ask", model: "claude-haiku-4-5" });
     await recorder.until((e) => e.type === "session.started" && e.threadId === "t-review-ask");
     expect(await raise("t-review-ask", "ask-ask")).toHaveProperty("nativeReview", undefined);
+  });
+
+  it("attaches exact native Bash command input with the launch directory only to shell permissions", async () => {
+    await create("hang");
+    const threadId = "t-command-descriptor";
+    await instance.adapter.sendTurn({ threadId, text: "go", cwd: scratch });
+    const conn = await connectSocket(permissionSocketPath(threadId));
+    const command = `printf '  ${"complete input ".repeat(30)}'\n  pwd  `;
+    try {
+      for (const [index, ask] of [
+        { tool: "Bash", input: { command }, expected: { command, cwd: realpathSync(scratch) } },
+        { tool: "Bash", input: { command, dangerouslyDisableSandbox: true }, expected: { command, cwd: realpathSync(scratch) } },
+        { tool: "Bash", input: { command: ["echo", "do not join argv"] }, expected: undefined },
+        { tool: "Bash", input: { description: "echo display only" }, expected: undefined },
+        { tool: "mcp__shell__run", input: { command }, expected: undefined },
+        { tool: "AskUserQuestion", kind: "question", input: { command, question: "Run this?" }, expected: undefined },
+      ].entries()) {
+        const id = `command-descriptor-${index}`;
+        conn.write(JSON.stringify({ t: "ask", id, ...ask }) + "\n");
+        const opened = await recorder.until((event) => event.type === "request.opened" && event.requestId === id);
+        expect(opened).toHaveProperty("command", ask.expected);
+        if (ask.input.dangerouslyDisableSandbox === true) expect(opened).toHaveProperty("requiresExplicitApproval", true);
+        await instance.adapter.respondToRequest(threadId, id, { behavior: ask.kind === "question" ? "answer" : "deny", message: "No" });
+      }
+    } finally {
+      conn.destroy();
+    }
+    await instance.adapter.interruptTurn(threadId);
+    await recorder.until((event) => event.type === "turn.completed");
   });
 
   it("brokers a permission ask into request.opened and answers over the socket", async () => {

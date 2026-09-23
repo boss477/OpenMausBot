@@ -6,7 +6,7 @@
 //
 // The fake CLI is a shebang script Windows cannot exec directly —
 // resolveCliSpawn turns it into `node <script>`, so these run everywhere.
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -232,6 +232,8 @@ describe("ACP turns (fake CLI)", () => {
     delete process.env.FAKE_ACP_LOAD_ERROR;
     delete process.env.FAKE_ACP_ALLOW_ALWAYS;
     delete process.env.FAKE_ACP_PERMISSION_ANSWER;
+    delete process.env.FAKE_ACP_PERMISSION_TOOL_CALL;
+    delete process.env.FAKE_ACP_PERMISSION_OPTIONS;
     delete process.env.XAI_API_KEY;
     delete process.env.OPENCODE_API_KEY;
     delete process.env.CURSOR_API_KEY;
@@ -690,6 +692,7 @@ describe("ACP turns (fake CLI)", () => {
     await instance.adapter.sendTurn({
       threadId: "t-perm",
       text: "go",
+      cwd: scratch,
       integrations: {
         localComputer: {
           command: "/cua-driver",
@@ -705,9 +708,10 @@ describe("ACP turns (fake CLI)", () => {
       requestType: "permission",
       tool: "shell",
       approvalScope: "local-computer",
+      command: { command: "echo hi", cwd: realpathSync(scratch) },
     });
 
-    await instance.adapter.respondToRequest("t-perm", (opened as any).requestId, { behavior: "allow" });
+    expect(await instance.adapter.respondToRequest("t-perm", (opened as any).requestId, { behavior: "allow" })).toBe("allowed-once");
     const resolved = await recorder.until((e) => e.type === "request.resolved");
     expect(resolved).toMatchObject({
       behavior: "allow",
@@ -716,6 +720,47 @@ describe("ACP turns (fake CLI)", () => {
     });
     const done = await recorder.until((e) => e.type === "turn.completed");
     expect(done).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    { name: "full raw command", toolCall: { kind: "execute", rawInput: { command: `printf '  ${"complete input ".repeat(30)}'\n  pwd  ` } }, descriptor: true },
+    { name: "title without raw input", toolCall: { kind: "execute", title: "echo display only" }, descriptor: false },
+    { name: "argv raw input", toolCall: { kind: "execute", rawInput: { command: ["echo", "do not join argv"] } }, descriptor: false },
+    { name: "MCP tool", toolCall: { kind: "other", title: "mcp__example__run", rawInput: { command: "echo not a shell approval" } }, descriptor: false },
+    { name: "MCP execute tool", toolCall: { kind: "execute", title: "mcp__example__run", rawInput: { command: "echo not a native shell approval" } }, descriptor: false },
+    { name: "question", toolCall: { toolCallId: "interaction_command", kind: "execute", rawInput: { command: "echo not a shell approval" } }, descriptor: false },
+    { name: "relative cwd", toolCall: { kind: "execute", rawInput: { command: "pwd", cwd: "unknown-relative-directory" } }, descriptor: false },
+  ])("keeps command grants scoped to complete shell input: $name", async ({ toolCall, descriptor }) => {
+    process.env.FAKE_ACP_PERMISSION_TOOL_CALL = JSON.stringify(toolCall);
+    await create(GrokAgentDriver, "permission");
+    await instance.adapter.sendTurn({ threadId: "t-acp-command-descriptor", text: "go", cwd: scratch });
+    const opened = await recorder.until((event) => event.type === "request.opened");
+    expect(opened).toHaveProperty("command", descriptor ? { command: toolCall.rawInput?.command, cwd: realpathSync(scratch) } : undefined);
+    await instance.adapter.respondToRequest("t-acp-command-descriptor", opened.requestId!, { behavior: "deny" });
+    await recorder.until((event) => event.type === "turn.completed");
+  });
+
+  it("uses an explicit ACP shell directory and rejects conflicting directory metadata", async () => {
+    const command = "pwd";
+    const directory = join(scratch, "execution-directory");
+    process.env.FAKE_ACP_PERMISSION_TOOL_CALL = JSON.stringify({ kind: "execute", rawInput: { command, workdir: directory } });
+    await create(GrokAgentDriver, "permission");
+    await instance.adapter.sendTurn({ threadId: "t-acp-explicit-cwd", text: "go", cwd: scratch });
+    const opened = await recorder.until((event) => event.type === "request.opened");
+    expect(opened).toHaveProperty("command", { command, cwd: directory });
+    await instance.adapter.respondToRequest("t-acp-explicit-cwd", opened.requestId!, { behavior: "deny" });
+    await recorder.until((event) => event.type === "turn.completed");
+
+    // A separate process observes a new fake provider payload.
+    await instance.dispose();
+    recorder.stop();
+    process.env.FAKE_ACP_PERMISSION_TOOL_CALL = JSON.stringify({ kind: "execute", rawInput: { command, cwd: scratch, workdir: directory } });
+    await create(GrokAgentDriver, "permission");
+    await instance.adapter.sendTurn({ threadId: "t-acp-conflicting-cwd", text: "go", cwd: scratch });
+    const conflict = await recorder.until((event) => event.type === "request.opened");
+    expect(conflict).toHaveProperty("command", undefined);
+    await instance.adapter.respondToRequest("t-acp-conflicting-cwd", conflict.requestId!, { behavior: "deny" });
+    await recorder.until((event) => event.type === "turn.completed");
   });
 
   it("per-bot Ask surfaces permissions from a legacy full-auto instance", async () => {
@@ -756,6 +801,23 @@ describe("ACP turns (fake CLI)", () => {
     await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId);
     const argv = JSON.parse(readFileSync(dump, "utf8")).argv as string[];
     expect(argv[argv.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+  });
+
+  it.each([false, true])("returns rejected when an allow has no native permission option (always: %s)", async (always) => {
+    process.env.FAKE_ACP_PERMISSION_OPTIONS = JSON.stringify([{ optionId: "reject", kind: "reject_once" }]);
+    const answer = join(scratch, "reject-only-answer.txt");
+    process.env.FAKE_ACP_PERMISSION_ANSWER = answer;
+    await create(GrokAgentDriver, "permission");
+    const threadId = "t-reject-only";
+    await instance.adapter.sendTurn({ threadId, text: "go", approvalMode: "ask" });
+    const opened = await recorder.until((event) => event.type === "request.opened");
+    expect(await instance.adapter.respondToRequest(threadId, "unknown-request", { behavior: "allow" })).toBe("unavailable");
+    expect(await instance.adapter.respondToRequest(threadId, opened.requestId!, { behavior: "allow", always })).toBe("rejected");
+    const resolved = await recorder.until((event) => event.type === "request.resolved" && event.requestId === opened.requestId);
+    expect(resolved).toMatchObject({ behavior: "deny", source: "system" });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(readFileSync(answer, "utf8")).toBe("cancelled");
+    expect(await instance.adapter.respondToRequest(threadId, opened.requestId!, { behavior: "allow" })).toBe("unavailable");
   });
 
   it("hands 'Always allow this session' to the agent's own allow_always option", async () => {

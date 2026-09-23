@@ -158,6 +158,10 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     if (typeof card.summary === "string") card.summary = redactSecretsInText(card.summary);
     if (typeof card.held === "string") card.held = redactSecretsInText(card.held);
     if (typeof card.answeredText === "string") card.answeredText = redactSecretsInText(card.answeredText);
+    if (card.commandAllowlist && (
+      redactSecretsInText(card.commandAllowlist.command) !== card.commandAllowlist.command ||
+      redactSecretsInText(card.commandAllowlist.cwd) !== card.commandAllowlist.cwd
+    )) delete card.commandAllowlist;
     // Bot-authored question text sits behind the subtitle the same way a
     // routine's instructions do, so it is scrubbed on the same boundary.
     if (card.questionRequest) {

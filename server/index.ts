@@ -3,7 +3,7 @@
 // folds one SSE event stream; every provider process runs here.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync, mkdirSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -42,6 +42,8 @@ import {
 } from "../shared/credential-request.ts";
 
 import { approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdict, deliverFullAccessApproval, delegationInheritsFullAccess } from "./auto-approve.ts";
+import { CommandAllowlistStore, commandAllowlistCandidate } from "./command-allowlist.ts";
+import type { CommandAllowlistCandidate, CommandAllowlistResponse } from "../shared/command-allowlist.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import { configuredAccountDirectory, assertSeparateClaudeAccount, claudeAccountInfo, createClaudeAccountSchema, instanceSettingsSchema, newClaudeAccount } from "./claude-accounts.ts";
 import { providerIconPatchSchema, withInstanceIcon } from "./provider-icon.ts";
@@ -578,6 +580,7 @@ const sessions = new SessionRegistry({
 const sharedComputers = new SharedComputers(id => sessions.isLive(id));
 // Who each thread is for, when a signed-in person can be named (server-private).
 const threadStarters = new ThreadStarters(join(DATA_DIR, "thread-starters.json"));
+const commandAllowlist = new CommandAllowlistStore(join(DATA_DIR, "command-allowlist.json"));
 const SESSION_COOKIE = sessionCookieName(PORT, ENVIRONMENT_ID);
 const HOSTED_WORKSPACE = hostedWorkspaceConfigured();
 let workspaceAccess: WorkspaceAccess | null = null;
@@ -740,6 +743,30 @@ function cardAnswerRefusal(auth: RequestAuth, threadId: string, requestId: strin
   const known = [threadStarters.get(threadId), cardRequesterKey(threadId, requestId)].filter((person): person is string => Boolean(person));
   if (!known.length || known.includes(personKey(auth.session))) return null;
   return "Only the person who started this conversation or sent this request, or a workspace admin, can answer this card.";
+}
+
+function canManageCommandAllowlist(auth: RequestAuth): boolean {
+  return auth.kind === "loopback" ? auth.trust !== "service" : auth.scopes.includes("admin");
+}
+
+const COMMAND_ALLOWLIST_DRIVERS = new Set([
+  "claudeAgent", "codex", "antigravityAgent", "grokAgent", "opencodeGo", "kimiAgent",
+  "droidAgent", "cursorAgent", "qwenAgent", "geminiAgent", "hermesAgent", "customAcp",
+]);
+
+function commandAllowlistResponse(bot: BotRecord): CommandAllowlistResponse {
+  const instance = registry.get(bot.modelSelection.instanceId);
+  const task = store.taskByThread(bot.id, bot.threadId);
+  let cwd = task?.cwd !== undefined ? task.cwd : bot.cwd ?? join(realpathSync(DATA_DIR), "task-workspaces", bot.id, bot.threadId);
+  if (cwd && existsSync(cwd)) cwd = realpathSync(cwd);
+  return {
+    rules: commandAllowlist.list(bot.id),
+    supported: COMMAND_ALLOWLIST_DRIVERS.has(instance?.driverKind ?? ""),
+    context: {
+      providerInstanceId: bot.modelSelection.instanceId,
+      cwd,
+    },
+  };
 }
 
 function decisionActorFor(auth: RequestAuth): DecisionActor {
@@ -4009,6 +4036,8 @@ store.onChange((change) => {
       break;
     }
     case "bot.deleted":
+      try { commandAllowlist.clear(change.botId); }
+      catch { console.error("[command-allowlist] Could not remove deleted bot's saved rules."); }
       broadcast({ kind: "bot.deleted", botId: change.botId });
       break;
     case "group": {
@@ -4295,6 +4324,17 @@ onSteeredQueueChange(() => broadcast({ kind: "bot.queued", queues: publicBotQueu
 // once can collide on a bare id and patch each other's messages.
 const toolMessageByItem = new Map<string, string>(); // threadId:itemId -> messageId
 const askMessageByRequest = new Map<string, string>(); // threadId:requestId -> messageId
+// Only native, live permission metadata can become a remembered grant. Never
+// rebuild executable authority from an imported transcript or display summary.
+const pendingCommandRules = new Map<string, { botId: string; candidate: CommandAllowlistCandidate }>();
+
+function commandRememberRefusal(auth: RequestAuth, threadId: string, requestId: string, behavior: string): string | null {
+  if (!canManageCommandAllowlist(auth)) return "Only the workspace owner or an admin can save bot-wide command permissions.";
+  if (behavior !== "allow" || !pendingCommandRules.has(`${threadId}:${requestId}`)) {
+    return "This live request does not contain a command that can be saved. Allow it once instead.";
+  }
+  return null;
+}
 
 /** Deliver a person's answer to the engine that asked, and tell the truth
  * about what happened. `unavailable` — the turn ended, the ask timed out,
@@ -4310,6 +4350,7 @@ async function answerRequest(
   decidedFor?: { id: string; name: string },
   /** "Always allow this session": the provider keeps the allow, not the app */
   always?: boolean,
+  rememberCommand?: boolean,
 ): Promise<RequestOutcome> {
   // Snapshot the card BEFORE delivering the answer: a delivered answer
   // resolves the request synchronously through the fold, which consumes
@@ -4323,6 +4364,7 @@ async function answerRequest(
     ? thread.find((m) => m.id === cardMessageId)
     : thread.find((m) => m.card?.requestId === requestId);
   const card = cardMessage?.card;
+  const remembered = rememberCommand ? pendingCommandRules.get(`${threadId}:${requestId}`) : undefined;
   const instance = registry.get(instanceId);
   let outcome: RequestOutcome = "unavailable";
   if (instance) {
@@ -4330,6 +4372,17 @@ async function answerRequest(
       outcome = await instance.adapter.respondToRequest(threadId, requestId, { behavior, message, always: always && behavior === "allow" });
     } catch {
       outcome = "unavailable";
+    }
+  }
+  if (remembered && outcome === "allowed-once" && behavior === "allow" && store.bot(remembered.botId)) {
+    // Persist only after the provider accepted this exact live request. A dead
+    // card, denied request, failed delivery or process restart saves no grant.
+    try {
+      commandAllowlist.add(remembered.botId, remembered.candidate);
+    } catch {
+      store.appendMessage(threadId, { role: "bot", kind: "activity", tool: {
+        name: "Command allowed once, but its allowlist rule could not be saved. Try again from the permissions menu.", ok: false,
+      } });
     }
   }
   // An answered question keeps its words. `request.resolved` only records
@@ -4385,6 +4438,7 @@ async function answerRequest(
  * be answered. Routine proposals are harness-owned and durable, so they stay
  * actionable even after the proposing turn has stopped. */
 function closeOpenApprovals(threadId: string): void {
+  for (const key of pendingCommandRules.keys()) if (key.startsWith(`${threadId}:`)) pendingCommandRules.delete(key);
   // Peer approvals also hold an in-memory promise. Resolve those first; merely
   // patching their cards would leave the delegation queue waiting 15 minutes.
   cancelPeerApprovalsForThread(threadId);
@@ -5555,7 +5609,12 @@ bus.subscribe((event: RuntimeEvent) => {
   const privateImageEvent = event.type === "item.completed" && event.itemType === "assistant_image";
   // The durable message patch below is the public frame. Sending raw base64
   // through runtime SSE would multiply large bytes across every app window.
-  if (!privateImageEvent) broadcast({ kind: "runtime", event });
+  if (!privateImageEvent) {
+    // Exact executable input is internal matching metadata, not inspector UI.
+    // The event bus's persistence redactor does not scrub its live event.
+    const publicEvent = event.type === "request.opened" ? { ...event, command: undefined } : event;
+    broadcast({ kind: "runtime", event: publicEvent });
+  }
   const routineRun = privateImageEvent ? null : (routines?.handleRuntimeEvent(event) ?? null);
   const ownerBot = store.botByThread(event.threadId);
   const bot = ownerBot ? botForThread(ownerBot.id, event.threadId) ?? undefined : undefined;
@@ -5674,14 +5733,22 @@ bus.subscribe((event: RuntimeEvent) => {
       const permission = event.requestType === "permission" && !event.questions?.length;
       // A permission request here is one the provider left for a person: its
       // own mode already ran (Ask, Edits, Auto's reviewer, Custom's config).
-      // OpenMausBot decides nothing about the action itself. Only Full access
-      // answers, because that is exactly what the person granted. A QUESTION
+      // Only the person's explicit Full access or exact saved command answers.
+      // The app does not guess whether the action is safe. A QUESTION
       // always reaches the human — even Full access never invents an answer.
       const asker = bot ?? (speaker ? store.bot(speaker.botId) : undefined);
       const unattended = permission && asker && event.requestId ? isUnattended(asker.id, event.threadId) : false;
       const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId)) : "ask";
+      // Native shell descriptors are distinct from computer/MCP permissions;
+      // choosing a local desktop must not disable an exact shell grant.
+      const command = permission && asker && event.requestId && !event.requiresExplicitApproval && event.command
+        ? commandAllowlistCandidate({ ...event.command, providerInstanceId: event.providerInstanceId ?? asker.modelSelection.instanceId })
+        : null;
       const verdict = permission && asker && event.requestId
-        ? autoVerdict(effectiveApprovalMode, event.tool, { requiresExplicitApproval: event.requiresExplicitApproval })
+        ? autoVerdict(effectiveApprovalMode, event.tool, {
+          requiresExplicitApproval: event.requiresExplicitApproval,
+          commandAllowed: Boolean(command && commandAllowlist.matches(asker.id, command)),
+        })
         : null;
       // Auto's reviewer is the engine's own. Claude accepts `--permission-mode
       // auto` for any model and starts in Manual without a word when auto is
@@ -5730,8 +5797,8 @@ bus.subscribe((event: RuntimeEvent) => {
             if (outcome !== "unavailable") pushMessage({
               role: "bot", kind: "activity",
               tool: { name: outcome === "rejected"
-                ? "The provider rejected this action despite Full access."
-                : "error: could not deliver Full access to the provider; retry the task after reconnecting.", ok: false },
+                ? `The provider rejected this action despite ${verdict.source === "command-allowlist" ? "the saved command permission" : "Full access"}.`
+                : "error: could not deliver approval to the provider; retry the task after reconnecting.", ok: false },
             });
             return;
           }
@@ -5754,7 +5821,7 @@ bus.subscribe((event: RuntimeEvent) => {
         })().catch(() => {
           // A receipt failure must neither crash the server nor manufacture
           // a new permission request after the provider took our answer.
-          console.error("[full-access] Could not record the provider approval result.");
+          console.error("[approval] Could not record the provider approval result.");
         });
         break;
       }
@@ -5778,8 +5845,8 @@ bus.subscribe((event: RuntimeEvent) => {
           requestId: event.requestId,
           tool: permission ? event.tool : undefined,
           questionRequest: questions ? { version: 1, questions } : undefined,
-          // the provider can keep an allow for its session; the app keeps
-          // no grant of its own for a provider's tool
+          commandAllowlist: command ?? undefined,
+          // Provider-owned session grants remain separate from exact commands.
           allowSession: permission && event.allowSession && !event.requiresExplicitApproval ? true : undefined,
           // The text stays for cards saved before heldCode existed, and for
           // clients that do not know the key yet.
@@ -5789,6 +5856,7 @@ bus.subscribe((event: RuntimeEvent) => {
         },
       });
       if (event.requestId) askMessageByRequest.set(`${event.threadId}:${event.requestId}`, message.id);
+      if (command && asker && event.requestId) pendingCommandRules.set(`${event.threadId}:${event.requestId}`, { botId: asker.id, candidate: command });
       // Every card that reaches a human is a decision too: "the provider
       // left this for you, in this mode". `question` marks the cards no
       // rule may ever answer; a permission card without a verdict (no known
@@ -5826,6 +5894,7 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     }
     case "request.resolved": {
+      if (event.requestId) pendingCommandRules.delete(`${event.threadId}:${event.requestId}`);
       // answered (by whoever): the turn is working again, unless it settled
       const waiting = bot ?? (speaker ? store.bot(speaker.botId) : undefined);
       if (bot && store.taskByThread(bot.id, event.threadId)?.activity === "waiting-on-you") {
@@ -16435,6 +16504,27 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       broadcast({ kind: "bot", bot: visible });
       return json(res, 200, { bot: visible });
     }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/command-allowlist(?:\/([\w-]+))?$/);
+    if (m && ["GET", "POST", "DELETE"].includes(method)) {
+      if (!canManageCommandAllowlist(auth)) return json(res, 403, { error: "Only the workspace owner or an admin can manage command permissions." });
+      const bot = requestedTaskBot(m[1], url.searchParams.get("threadId") ?? undefined);
+      if (method === "GET" && !m[2]) return json(res, 200, commandAllowlistResponse(bot));
+      if (method === "POST" && !m[2]) {
+        const candidate = commandAllowlistCandidate(await readBody(req));
+        if (!candidate) return json(res, 400, { error: "Enter an exact command without secret values, an absolute working folder, and a provider." });
+        const instance = registry.get(candidate.providerInstanceId);
+        if (!instance || !COMMAND_ALLOWLIST_DRIVERS.has(instance.driverKind)) {
+          return json(res, 400, { error: "This provider does not supply structured command approvals." });
+        }
+        commandAllowlist.add(bot.id, candidate);
+        return json(res, 200, commandAllowlistResponse(bot));
+      }
+      if (method === "DELETE" && m[2]) {
+        commandAllowlist.remove(bot.id, m[2]);
+        return json(res, 200, commandAllowlistResponse(bot));
+      }
+      return json(res, 405, { error: "Unsupported command allowlist operation" });
+    }
     m = path.match(/^\/api\/bots\/([\w-]+)\/always-allow$/);
     if (m && method === "POST") {
       const body = await readBody(req);
@@ -17800,6 +17890,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
       const refusal = cardAnswerRefusal(auth, bot.threadId, String(body.requestId), behavior);
       if (refusal) return json(res, 403, { error: refusal });
+      if (body.rememberCommand === true) {
+        const refusal = commandRememberRefusal(auth, bot.threadId, String(body.requestId), behavior);
+        if (refusal) return json(res, 403, { error: refusal });
+      }
       return await answeringCardAs(auth, bot.threadId, String(body.requestId), async () => {
         if (await resolveAndSendTeamSetup(res, {
           botId: bot.id, threadId: bot.threadId, requestId: String(body.requestId), behavior,
@@ -17833,7 +17927,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           resolvePeerComms(approvalBus, String(body.requestId), behavior)) {
           return json(res, 200, { ok: true, outcome: behavior === "allow" ? "allowed-once" : "rejected" });
         }
-        const outcome = await answerRequest(bot.threadId, bot.modelSelection.instanceId, String(body.requestId), behavior, body.message, { id: bot.id, name: bot.name }, body.always === true);
+        const outcome = await answerRequest(bot.threadId, bot.modelSelection.instanceId, String(body.requestId), behavior, body.message, { id: bot.id, name: bot.name }, body.always === true, body.rememberCommand === true);
         return json(res, 200, { ok: true, outcome });
       });
     }
@@ -17850,6 +17944,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const requestId = String(body.requestId);
       const refusal = cardAnswerRefusal(auth, threadId, requestId, behavior);
       if (refusal) return json(res, 403, { error: refusal });
+      if (body.rememberCommand === true) {
+        const refusal = commandRememberRefusal(auth, threadId, requestId, behavior);
+        if (refusal) return json(res, 403, { error: refusal });
+      }
       return await answeringCardAs(auth, threadId, requestId, async () => {
         const skillCard = store.messagesFor(threadId).find(
           (message) => message.card?.requestId === requestId && message.card.skillRequest,
@@ -17927,7 +18025,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           : store.botByThread(threadId);
         if (!owner && !pending) return json(res, 404, { error: "nothing is waiting on an answer in this conversation" });
         const requestOwner = owner ? botForThread(owner.id, threadId) : null;
-        const outcome = await answerRequest(threadId, requestOwner?.modelSelection.instanceId ?? "", requestId, behavior, body.message, owner ? { id: owner.id, name: owner.name } : undefined, body.always === true);
+        const outcome = await answerRequest(threadId, requestOwner?.modelSelection.instanceId ?? "", requestId, behavior, body.message, owner ? { id: owner.id, name: owner.name } : undefined, body.always === true, body.rememberCommand === true);
         return json(res, 200, { ok: true, outcome });
       });
     }

@@ -55,6 +55,7 @@ import type {
   RuntimeEventListener,
   SendTurnInput,
   ProviderErrorCode,
+  RequestOutcome,
   TurnImageInput,
 } from "../../contracts.ts";
 import { newEventId, newId } from "../../contracts.ts";
@@ -62,6 +63,7 @@ import { augmentedPath } from "../../env-path.ts";
 import { supportsApprovalMode } from "../../../shared/approval-mode.ts";
 
 import { appendNative } from "../native.ts";
+import { acpPermissionCommand, permissionLaunchCwd } from "../permission-command.ts";
 import { commandSummary, toolDetailPreview } from "../../tool-summary.ts";
 import { extractMcpImages } from "../../mcp-tool-images.ts";
 import { redactSecretsInText } from "../../redact.ts";
@@ -107,7 +109,7 @@ type AcpAskFinish = (
   source?: "user" | "timeout" | "system",
   message?: string,
   always?: boolean,
-) => void;
+) => RequestOutcome;
 
 /** The running turn a pooled session is servicing — the per-turn half of
  *  the bookkeeping (Claude's Session.turn, split the same way). Server
@@ -709,6 +711,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         cwd: string,
         contractKey: string,
       ): AcpSession => {
+        const commandCwd = permissionLaunchCwd(cwd);
         const child = spawnCli(launch.command, argv, {
           cwd,
           env,
@@ -922,6 +925,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             }
           }
           const tool = kind === "execute" ? "shell" : kind === "edit" ? "edit" : kind || "tool";
+          const isShellCommand = !isQuestion && kind === "execute" && !/^mcp(?:__|[.:])/i.test(String(toolCall.title ?? ""));
           const summary = String(toolCall.rawInput?.command ?? toolCall.title ?? tool).slice(0, 200);
           const requestId = newId();
           const finish = (
@@ -929,8 +933,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             source: "user" | "timeout" | "system" = "user",
             message?: string,
             always?: boolean,
-          ) => {
-            if (!current.asks.delete(requestId)) return;
+          ): RequestOutcome => {
+            if (!current.asks.delete(requestId)) return "unavailable";
             clearTimeout(timer);
             const want = behavior === "allow" ? "allow" : "reject";
             const forSession = want === "allow" && always === true && !isQuestion && !current.controlsHost;
@@ -965,6 +969,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               source: optionId ? source : "system",
               approvalScope: current.controlsHost ? "local-computer" : undefined,
             });
+            return !optionId ? "rejected" : isQuestion ? "answered" : behavior === "allow" ? "allowed-once" : "rejected";
           };
           const timer = setTimeout(() => {
             emit({ ...base(threadId, current.turnId), type: "runtime.error", message: DENY_TIMEOUT_NOTE });
@@ -979,6 +984,10 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             requestType: isQuestion ? "question" : "permission",
             tool,
             summary,
+            command: isShellCommand ? acpPermissionCommand(toolCall.rawInput, commandCwd) : undefined,
+            requiresExplicitApproval: isShellCommand && (
+              toolCall.rawInput?.dangerouslyDisableSandbox === true || toolCall.rawInput?.sandbox_permissions === "require_escalated"
+            ) || undefined,
             choices: isQuestion
               ? options.flatMap((option) => typeof option.name === "string" && option.name.trim() ? [option.name.trim()] : [])
               : undefined,
@@ -1689,12 +1698,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             const turn = active.get(threadId);
             const finish = turn?.asks.get(requestId);
             if (!finish) return "unavailable"; // settled, timed out, or turn gone
-            finish(decision.behavior, "user", decision.message, decision.always === true);
-            return decision.behavior === "allow"
-              ? "allowed-once"
-              : decision.behavior === "answer"
-                ? "answered"
-                : "rejected";
+            return finish(decision.behavior, "user", decision.message, decision.always === true);
           },
           hasSession: (threadId) => active.has(threadId),
           stopAll: async () => {

@@ -376,6 +376,14 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
           : deps.skills.install(created.id, skill.source ?? `package:${pkg!.id}`, [{ path: "SKILL.md", content: skill.instructions }]);
         if ("error" in added) throw new Error(`Package skill "${skillName}" could not be imported: ${added.error}`);
       }
+      // Starter notes are copied once, on this first add.
+      for (const [path, text] of Object.entries(agent?.seed?.memory ?? {})) {
+        if (path === "MEMORY.md") deps.memory.writeIndex(created.id, text);
+        else deps.memory.writeTopic(created.id, path.slice("memory/".length), text);
+        notes += 1;
+      }
+      // An organization bot's part hashes are its last write, so a bot that
+      // has them is complete (org-library.ts reads that after a crash).
       if (org && agent) {
         const written = store.bot(created.id)!;
         const local: Record<AgentPart, unknown> = {
@@ -398,13 +406,13 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
         store.patchBot(created.id, { packageBase: pairs(AGENT_PARTS, agentReleaseValues(agent, playbookByKey), local) });
         orgIndex.bots[member.key] = created.id;
       }
-      // Starter notes are copied once, on this first add.
-      for (const [path, text] of Object.entries(agent?.seed?.memory ?? {})) {
-        if (path === "MEMORY.md") deps.memory.writeIndex(created.id, text);
-        else deps.memory.writeTopic(created.id, path.slice("memory/".length), text);
-        notes += 1;
-      }
     }
+
+    // The brief goes before the group chats and routines, and the leader is
+    // set last, so an organization Add the app stopped partway through can
+    // tell a finished team from a partial one (org-library.ts).
+    const brief = Boolean(pkg?.team?.brief?.trim());
+    if (brief) deps.sections.writeBrief(section, pkg!.team!.brief!);
 
     // A package is an explicit structure import: its rooms are created from
     // package-local keys only, then normalized to the fresh bot ids.
@@ -473,8 +481,6 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
     }
 
     if (pkg?.team?.leader) store.setChiefOfStaff(botIds.get(pkg.team.leader)!);
-    const brief = Boolean(pkg?.team?.brief?.trim());
-    if (brief) deps.sections.writeBrief(section, pkg!.team!.brief!);
     if (org && pkg?.team) {
       orgIndex.section = section;
       orgIndex.team.parts = pairs(TEAM_PARTS, {

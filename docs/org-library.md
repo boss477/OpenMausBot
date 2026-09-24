@@ -43,8 +43,9 @@ Compared with a file:
   same install on every reconnect. A second Add answers `200
   {alreadyAdded: true}`.
 
-A bot added from a package shows where it came from in **Bot settings →
-Identity**: "From Sales desk 1.3.0 · Acme Partners". This version never
+A bot added from the organization's library shows where it came from in
+**Bot settings → Identity**: "From Sales desk 1.3.0 · Acme Partners". A bot
+imported from a file shows no such line, as before. This version never
 changes something it already added. When the catalog names a newer release,
 the card says "Version X available. Updates arrive automatically in an
 upcoming OpenMausBot update."
@@ -119,7 +120,7 @@ contains names, paths or error text.
 
 | File | Written by | What |
 |---|---|---|
-| `state.json` | runtime | The index of what was added (contract §3.4), plus `kind` and `name` per install. Mode 0600. |
+| `state.json` | runtime | The index of what was added (contract §3.4), plus `kind` and `name` per install, and `adding`: team Adds that have started and not finished. Mode 0600. |
 | `blobs/<sha256>.json` | Electron | Release bytes, checked on every read. |
 | `catalog.json` | Electron | The last applied catalog body. The runtime does not read it. |
 | `presets.json` | presets work (W2-4) | Preset bots. |
@@ -133,10 +134,30 @@ these cases:
 - whenever a bot or group chat is deleted, or a team is renamed.
 
 A team's section is read from where its bots are now, so renaming the team
-needs no hook. If the app stops after the records are written but before
-the index is, the records are adopted once the catalog names their package,
-and a second Add is still a no-op. An adopted install has no team-part
-hashes, so a later update treats those parts as edited and keeps them.
+needs no hook. A team counts as added while any of its bots, group chats or
+routines is left. An offered skill someone put on another bot is a copy: it
+stays, but it does not keep the team added, so once the team's own records
+are gone the install is `removed` and **Add** brings the whole team back.
+
+If the app stops after the records are written but before the index is, the
+records are adopted once the catalog names their package, and a second Add
+is still a no-op. An adopted install has no team-part hashes, so a later
+update treats those parts as edited and keeps them.
+
+If the app stops in the middle of adding a team, the next start finds its
+entry under `adding` (written before the first record) and looks at what
+was written. The importer writes each bot's part hashes after its skills and
+starter notes, the brief before the group chats and routines, and the leader
+last. So:
+
+- **Every bot, group chat and routine is there and the leader is set:** the
+  team is indexed as added, like the crash above.
+- **Anything is missing:** the partly added bots, group chats, routines and
+  their new team are removed again, and the report says `failed` with
+  `import_failed`. **Add** then brings the whole team. Two things may stay
+  behind: its connection slots (switched off, with no values, under their
+  MCP server names), and its bots' picture files, which a failed import
+  leaves too.
 
 ## Routes
 

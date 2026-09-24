@@ -15,7 +15,9 @@
 //   - keeps DATA_DIR/org-library/state.json as an index of what was added.
 //     The records themselves are the source of truth: the index is rebuilt
 //     from them on start, before every Add and whenever records disappear, so
-//     a crash between the two writes is adopted, never duplicated;
+//     a crash between the two writes is adopted, never duplicated. A team Add
+//     is marked in the index before its first record, so one the app stopped
+//     halfway through is removed again rather than adopted half-built;
 //   - switches off the skills and pauses the routines of a release its
 //     publisher withdrew;
 //   - reports a full snapshot of what this desktop has back to Electron,
@@ -47,7 +49,7 @@ import {
 import { pair, sha256Hex, type PartPair, type TeamPart } from "./package-parts.ts";
 import type { RoutineManager } from "./routines.ts";
 import type { SkillListing, SkillPackageStamp } from "./skills.ts";
-import { sectionKey, type Store, type StoreChange } from "./store.ts";
+import { sectionKey, type InstalledPackageMetadata, type Store, type StoreChange } from "./store.ts";
 import {
   PACKAGE_MAX_BYTES,
   PACKAGE_VERSION,
@@ -205,11 +207,30 @@ const installSchema = z.object({
 });
 export type OrgInstall = z.output<typeof installSchema>;
 
+// Additive to §3.4: a team Add that has started and not finished. Written
+// before the first record, removed with the index write that completes it.
+// The import is synchronous, so one found on disk means the app stopped
+// mid-import (the importer's own rollback runs on errors only).
+const partKeys = z.array(z.string().min(1).max(64)).max(500);
+const addingSchema = z.object({
+  packageId: z.string().regex(UUID),
+  ref: z.string().regex(REF),
+  publisher: installSchema.shape.publisher,
+  name: z.string().max(100),
+  release: z.string().regex(SEMVER),
+  sha256: z.string().regex(HEX64),
+  startedAt: count,
+  /** What a finished import has: every bot, group chat and routine key, and the leader. */
+  expect: z.object({ bots: partKeys, rooms: partKeys, routines: partKeys, leader: z.string().min(1).max(64).nullable() }),
+});
+export type OrgPendingAdd = z.output<typeof addingSchema>;
+
 const stateSchema = z.object({
   version: z.literal(1),
   source: z.object({ adminOrigin: z.string(), organizationId: z.string().regex(UUID) }).nullable(),
   appliedDigest: z.string().regex(HEX64).nullable(),
   installs: z.record(z.string().regex(INSTALL_ID), z.unknown()),
+  adding: z.record(z.string().regex(INSTALL_ID), z.unknown()).optional(),
 });
 
 export interface OrgLibraryStateFile {
@@ -217,10 +238,29 @@ export interface OrgLibraryStateFile {
   source: { adminOrigin: string; organizationId: string } | null;
   appliedDigest: string | null;
   installs: Record<string, OrgInstall>;
+  adding: Record<string, OrgPendingAdd>;
 }
 
 function emptyState(): OrgLibraryStateFile {
-  return { version: 1, source: null, appliedDigest: null, installs: {} };
+  return { version: 1, source: null, appliedDigest: null, installs: {}, adding: {} };
+}
+
+/** What scanRecords finds for one install id. */
+interface LiveRecords {
+  bots: Record<string, string>;
+  rooms: Record<string, string>;
+  routines: Record<string, string>;
+  /** Skill-state entries carrying the install, on any bot. */
+  skills: number;
+  sections: string[];
+  meta?: InstalledPackageMetadata;
+}
+
+/** A team install lives in its own bots, group chats and routines. An
+ * offered skill someone put on another bot is a copy, like any skill: it
+ * stays, but it does not keep the team "installed". */
+function teamAlive(live: LiveRecords | undefined): boolean {
+  return Boolean(live && (Object.keys(live.bots).length || Object.keys(live.rooms).length || Object.keys(live.routines).length));
 }
 
 // ── the library ─────────────────────────────────────────────────────────
@@ -229,7 +269,7 @@ export interface OrgLibraryDeps {
   /** DATA_DIR; the library lives in DATA_DIR/org-library/. */
   dataDir: string;
   store: Store;
-  routines: Pick<RoutineManager, "packageStamps" | "update">;
+  routines: Pick<RoutineManager, "packageStamps" | "update" | "listRoutines" | "remove">;
   skills: {
     list(botId: string): SkillListing[];
     stamps(botId: string): Array<{ name: string; enabled: boolean; stamp: SkillPackageStamp }>;
@@ -284,6 +324,7 @@ const refusal = (status: number, code: string, error: string) => ({ ok: false as
 const NOT_LISTED = "This package is not in your organization's library.";
 const NOT_READY = "This package hasn't finished downloading yet. Try again in a minute.";
 const NEWER_APP = "Update OpenMausBot to add this package.";
+const ADD_FAILED = "This package could not be added, so nothing was changed. Try again, or ask your organization's admin.";
 
 export class OrgLibrary {
   private readonly deps: OrgLibraryDeps;
@@ -297,6 +338,8 @@ export class OrgLibrary {
   private pending: Promise<void> = Promise.resolve();
   private recheck: ReturnType<typeof setTimeout> | null = null;
   private lastPosted: OrgLibraryStateMessage | null = null;
+  /** The install id add() is importing right now (never a crashed one). */
+  private importing: string | null = null;
   private readonly unsubscribe: () => void;
 
   constructor(deps: OrgLibraryDeps) {
@@ -391,16 +434,9 @@ export class OrgLibrary {
   /** Every live record that carries an organization install id. A routine
    * counts only while its bot exists (deleting a bot pauses, not removes,
    * its routines). */
-  private scanRecords() {
+  private scanRecords(): Map<string, LiveRecords> {
     const { store } = this.deps;
-    const found = new Map<string, {
-      bots: Record<string, string>;
-      rooms: Record<string, string>;
-      routines: Record<string, string>;
-      skills: number;
-      sections: string[];
-      meta?: NonNullable<Store["bots"][number]["installedPackage"]>;
-    }>();
+    const found = new Map<string, LiveRecords>();
     const entry = (installId: string) => {
       let value = found.get(installId);
       if (!value) {
@@ -428,11 +464,14 @@ export class OrgLibrary {
     return found;
   }
 
-  /** Whether anything here came from an organization. Without an install
-   * or a stamped record there is nothing to reconcile, so an installation
-   * that never had an organization reads no skill state at all. */
+  /** Whether anything here came from an organization. Without an install,
+   * a stamped record or a relayed catalog there is nothing to reconcile, so
+   * an installation that never had an organization reads no skill state at
+   * all. (Skill stamps alone are read only once a catalog arrives: they are
+   * how a skills-only package is recognized after a lost state.json.) */
   private hasOrgRecords(): boolean {
     return Object.keys(this.state.installs).length > 0 ||
+      Object.keys(this.state.adding).length > 0 ||
       this.deps.store.bots.some((bot) => bot.installedPackage?.source === "org") ||
       this.deps.store.groups.some((group) => group.installedPackage) ||
       this.deps.routines.packageStamps().length > 0;
@@ -440,14 +479,13 @@ export class OrgLibrary {
 
   /** Reconcile state.json with the records. Returns whether it changed. */
   rebuild(): boolean {
-    if (!this.hasOrgRecords()) return false;
+    if (!this.library && !this.hasOrgRecords()) return false;
     const now = this.deps.now?.() ?? Date.now();
+    let changed = this.resolveInterruptedAdds(now);
     const records = this.scanRecords();
-    let changed = false;
     for (const [installId, install] of Object.entries(this.state.installs)) {
       const live = records.get(installId);
-      const alive = Boolean(live && (Object.keys(live.bots).length || Object.keys(live.rooms).length || Object.keys(live.routines).length || live.skills));
-      if (!alive) {
+      if (!teamAlive(live)) {
         // A library install creates no records of its own; it stays.
         if (install.kind === "team" && install.status !== "removed") {
           install.status = "removed";
@@ -478,6 +516,9 @@ export class OrgLibrary {
       if (this.state.installs[installId] || !this.library) continue;
       const entry = this.library.catalog.packages.find((candidate) => this.currentInstallId(candidate.packageId) === installId);
       if (!entry) continue;
+      // A team is adopted from its own records. A skills-only package has
+      // none; an offered skill carrying its stamp shows it was added.
+      if (entry.kind === "team" ? !teamAlive(live) : !live.skills) continue;
       const meta = live.meta;
       const [slug] = entry.ref.split("/");
       this.state.installs[installId] = {
@@ -487,7 +528,7 @@ export class OrgLibrary {
         release: meta?.release ?? entry.release?.version ?? "0.0.0",
         sha256: meta?.sha256 ?? entry.release?.sha256 ?? "0".repeat(64),
         status: "installed",
-        kind: "team",
+        kind: entry.kind,
         name: meta?.name ?? entry.name,
         section: mostCommon(live.sections) ?? "",
         // What was written at install is not recoverable here; with no base
@@ -505,6 +546,66 @@ export class OrgLibrary {
       changed = true;
     }
     return changed;
+  }
+
+  /** Team Adds the app never finished (it stopped mid-import). A team whose
+   * records are all there is indexed, as any crash after the records is
+   * (§3.3). A partial one is removed again, so the person can add it whole
+   * from the shelf instead of keeping half a team that Add calls added. */
+  private resolveInterruptedAdds(now: number): boolean {
+    const pending = Object.entries(this.state.adding).filter(([installId]) => installId !== this.importing);
+    if (!pending.length) return false;
+    const records = this.scanRecords();
+    for (const [installId, add] of pending) {
+      const live = records.get(installId);
+      if (live && this.finished(add, live)) {
+        const previous = this.state.installs[installId];
+        this.state.installs[installId] = {
+          packageId: add.packageId, ref: add.ref, publisher: { ...add.publisher }, release: add.release, sha256: add.sha256,
+          status: "installed", kind: "team", name: add.name, section: mostCommon(live.sections) ?? "",
+          // As with any adopted install, the team-part and connection hashes
+          // were only in the index write that never happened.
+          team: { parts: {} }, bots: live.bots, rooms: live.rooms, routines: live.routines, connections: {}, presets: {},
+          removedLocally: [], addedAt: previous?.addedAt ?? add.startedAt, updatedAt: now,
+        };
+      } else {
+        if (live && teamAlive(live)) this.discardPartial(installId, live);
+        this.failures.set(add.packageId, { packageId: add.packageId, release: add.release, sha256: add.sha256, state: "failed", reason: "import_failed" });
+      }
+      delete this.state.adding[installId];
+    }
+    return true;
+  }
+
+  /** Every bot (with its skills and starter notes), group chat and routine
+   * the Add would have written, and its leader, which is set last. */
+  private finished(add: OrgPendingAdd, live: LiveRecords): boolean {
+    const { store } = this.deps;
+    return add.expect.bots.every((key) => Boolean(live.bots[key] && store.bot(live.bots[key]!)?.packageBase)) &&
+      add.expect.rooms.every((key) => Boolean(live.rooms[key])) &&
+      add.expect.routines.every((key) => Boolean(live.routines[key])) &&
+      (add.expect.leader === null || store.bot(live.bots[add.expect.leader] ?? "")?.chiefOfStaff === true);
+  }
+
+  /** The importer's rollback, for an import the app stopped in the middle
+   * of: its routines, group chats and bots go, and its new team with them.
+   * Every one of its routines belongs to one of its new bots, and a group
+   * chat it had not stamped yet has only those bots in that team. */
+  private discardPartial(installId: string, live: LiveRecords): void {
+    const { store, routines } = this.deps;
+    const botIds = new Set(Object.values(live.bots));
+    for (const routine of routines.listRoutines()) {
+      if (botIds.has(routine.botId)) routines.remove(routine.id);
+    }
+    const section = mostCommon(live.sections);
+    const groups = store.groups.filter((group) => group.installedPackage?.installId === installId ||
+      (!group.installedPackage && section !== undefined && sectionKey(group.section) === section &&
+        group.memberIds.length > 0 && group.memberIds.every((id) => botIds.has(id))));
+    for (const group of groups) store.deleteGroup(group.id);
+    for (const id of botIds) store.deleteBot(id);
+    // Only if nothing else is in it (the store refuses otherwise).
+    if (section && store.sections.includes(section)) store.changeEmptySection(section, null);
+    console.warn(`[org-library] removed a team that was only partly added when OpenMausBot stopped; it can be added again from the shelf`);
   }
 
   /** A release its publisher withdrew: its skills off, its routines paused,
@@ -623,12 +724,18 @@ export class OrgLibrary {
         const install = installSchema.safeParse(raw);
         if (install.success) installs[installId] = install.data;
       }
+      const adding: Record<string, OrgPendingAdd> = {};
+      for (const [installId, raw] of Object.entries(parsed.data.adding ?? {})) {
+        const add = addingSchema.safeParse(raw);
+        if (add.success) adding[installId] = add.data;
+      }
       const origin = parsed.data.source ? adminOrigin(parsed.data.source.adminOrigin) : null;
       return {
         version: 1,
         source: parsed.data.source && origin ? { adminOrigin: origin, organizationId: parsed.data.source.organizationId } : null,
         appliedDigest: parsed.data.appliedDigest,
         installs,
+        adding,
       };
     } catch {
       // The records are the source of truth; an unreadable index is rebuilt.
@@ -774,37 +881,68 @@ export class OrgLibrary {
     }
     const release = entry.release!;
     const [slug] = entry.ref.split("/");
+    const publisher = { organizationId: entry.publisher.organizationId, slug: slug!, name: entry.publisher.name };
+    const pkg = document.value.package;
+    // A team's Add is marked before its first record is written, so if the
+    // app stops mid-import the next start finishes the job one way or the
+    // other (resolveInterruptedAdds). A skills-only package writes nothing.
+    const pending = pkg.agents.length > 0 && Boolean(pkg.team);
+    const settle = () => {
+      if (!pending) return;
+      delete this.state.adding[installId];
+      this.importing = null;
+    };
+    if (pending) {
+      this.state.adding[installId] = {
+        packageId, ref: entry.ref, publisher, name: entry.name, release: release.version, sha256: release.sha256,
+        startedAt: this.deps.now?.() ?? Date.now(),
+        expect: {
+          bots: pkg.agents.map((agent) => agent.key),
+          rooms: (pkg.rooms ?? []).map((room) => room.key),
+          routines: (pkg.routines ?? []).map((routine) => routine.key),
+          leader: pkg.team?.leader ?? null,
+        },
+      };
+      try {
+        this.save();
+      } catch (error) {
+        delete this.state.adding[installId];
+        console.error(`[org-library] could not start adding ${entry.ref}: ${error instanceof Error ? error.message : String(error)}`);
+        return fail(refusal(500, "import_failed", ADD_FAILED), "import_failed");
+      }
+      this.importing = installId;
+    }
     let result: PackageImportResult;
     try {
       const imported = importPackageDocument(document.value, {
         trust: "org",
         mode: "add",
-        org: {
-          installId,
-          ref: entry.ref,
-          packageId,
-          sha256: release.sha256,
-          publisher: { organizationId: entry.publisher.organizationId, slug: slug!, name: entry.publisher.name },
-          adminOrigin: library.adminOrigin,
-          organizationId: library.organizationId,
-        },
+        org: { installId, ref: entry.ref, packageId, sha256: release.sha256, publisher, adminOrigin: library.adminOrigin, organizationId: library.organizationId },
       }, importDeps);
       if (imported.alreadyAdded) {
-        if (this.rebuild()) this.save();
+        settle();
+        this.rebuild();
+        this.save();
         return { ok: true, status: 200, value: { alreadyAdded: true, installId } };
       }
       result = imported;
     } catch (error) {
+      // The importer removed everything it created.
+      settle();
+      try {
+        this.save();
+      } catch {}
       if (error instanceof PackageImportError) return fail(refusal(422, error.code, error.message), "invalid_package");
       console.error(`[org-library] could not add ${entry.ref}: ${error instanceof Error ? error.message : String(error)}`);
-      return fail(refusal(500, "import_failed", "This package could not be added, so nothing was changed. Try again, or ask your organization's admin."), "import_failed");
+      return fail(refusal(500, "import_failed", ADD_FAILED), "import_failed");
     }
     const now = this.deps.now?.() ?? Date.now();
     const index: OrgInstallIndex = result.org!;
+    settle();
     this.state.installs[installId] = {
       packageId,
       ref: entry.ref,
-      publisher: { organizationId: entry.publisher.organizationId, slug: slug!, name: entry.publisher.name },
+      publisher,
       release: release.version,
       sha256: release.sha256,
       status: "installed",
@@ -822,7 +960,7 @@ export class OrgLibrary {
       updatedAt: now,
     };
     this.failures.delete(packageId);
-    // The records were written first; the index follows.
+    // The records were written first; the index follows, and clears the mark.
     this.save();
     this.report();
     return { ok: true, status: 201, value: { alreadyAdded: false, result } };

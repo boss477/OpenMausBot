@@ -38,14 +38,24 @@ checks the following:
   `listRoutines()` or the skill listing. The index and the report follow.
 - **Idempotency (§7.3.5).** Add twice gives one team. When `state.json` is
   deleted, the next relay adopts the records and Add stays a no-op. A
-  skills-only package's second Add is a no-op too. Signing out hides the
+  skills-only package's second Add is a no-op too, and after a lost
+  `state.json` it is adopted as a skills-only package. Signing out hides the
   shelf and keeps the copies. Reconnecting recognizes the installs.
+- **An Add the app stopped partway through.** The test copies the whole
+  installation at the instant the app would stop and starts again from the
+  copy. Stopped at the first routine, or just before the leader is set, the
+  next start removes the partial bots, group chat and routines and their
+  team, reports `failed`/`import_failed`, and Add then adds the whole team
+  under its own name with its leader and brief. Stopped right after the
+  leader, the team is indexed as added and Add is a no-op.
 - **Withdrawn (§7.3.6).** A withdrawn release has its skills off, its
   routines paused, `status: "withdrawn"`, and the report says
   `withdrawn_by_publisher`. A skill switched back on afterwards stays on. An
   entry that disappears changes nothing.
 - **Removal (§7.3.7).** Deleting the install's last bot marks it `removed`
-  and reports `removed_locally`. Add then works again.
+  and reports `removed_locally`. Add then works again. It does the same when
+  the team's offered skill is still on one of the person's own bots: the
+  skill stays there, and Add brings back all three bots.
 - **Skills-only package.** It is registered with no records, and its skills
   are offered per bot. Adding one puts it on, stamped. A duplicate is `409`.
   Withdrawing the package switches that skill off.
@@ -88,7 +98,7 @@ checks:
   waiting-release sentence and "Withdrawn by …";
 - "Included skills — switched on";
 - a skills-only preview with no team;
-- the provenance line.
+- the provenance line, which a bot imported from a file does not get.
 
 The second command runs a disposable `control-omb ui` app, with the key
 passed through `scripts/control-omb.ts`. It checks, in order:
@@ -158,3 +168,36 @@ Not production qualification: no real Admin, Electron relay, encrypted
 store or packaged app was involved. The Electron side (fetch, file cache,
 relay and posting the report) is separate work, and it was stood in for by
 the testing route and files written by the tests.
+
+## 2026-09-24: review fixes for PR #1768
+
+Three review findings were fixed, on macOS (arm64), against disposable
+fixtures only:
+
+- a team stayed "installed" while an offered skill it gave another bot was
+  left, so it could never be added again;
+- a team Add the app stopped partway through was adopted half-built;
+- a bot imported from a file showed a new provenance line, which changed
+  Bot settings on an installation with no organization.
+
+These passed: `pnpm typecheck`, `pnpm lint`, the four commands above
+(including the headless-renderer run with `OMB_UI_E2E=1`, together with
+`scripts/testing/team-share-ui.e2e.test.ts`), and the neighbouring tests
+listed in the section above plus `src/lib/team-share.test.ts`.
+
+Each of these was mutation-checked, with the named test seen failing:
+
+- an offered skill keeping a team alive (the offered-skill removal test);
+- no `adding` entry written before the import (both stopped-partway tests);
+- a partial team treated as finished (stopped at the first routine);
+- a finished team treated as partial (stopped after the leader);
+- the leader not checked (stopped just before the leader);
+- a partial team's routines kept (stopped just before the leader);
+- the brief written after the leader again (stopped after the leader);
+- a skills-only package adopted as a team (the lost `state.json` test);
+- the provenance line shown for a file stamp (`src/lib/org-library.test.ts`).
+
+Not tested: an actual process kill. The stops are simulated by copying the
+installation's files mid-import. The order in which each bot's starter notes
+and part hashes are written is not covered by a test, because the fixture has
+no stop point that tells them apart.

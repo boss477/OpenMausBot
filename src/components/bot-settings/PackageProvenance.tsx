@@ -1,6 +1,7 @@
-// The provenance line on a bot that came from a package: "From Sales desk
-// 1.3.0 · Acme Partners", plus "Withdrawn by Acme Partners" once the
-// publisher withdraws that release. Nothing for a bot made here.
+// The provenance line on a bot that came from the organization's library:
+// "From Sales desk 1.3.0 · Acme Partners", plus "Withdrawn by Acme Partners"
+// once the publisher withdraws that release. Nothing for a bot made here or
+// imported from a file.
 import { useEffect, useState } from "react";
 
 import type { Bot } from "@/state/store";

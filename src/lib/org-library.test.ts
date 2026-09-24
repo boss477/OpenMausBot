@@ -112,7 +112,10 @@ describe("the preview and the provenance line", () => {
 
   it("says where a bot came from, and when its release was withdrawn", () => {
     expect(packageProvenance(undefined)).toBeNull();
-    expect(packageProvenance({ id: "sales-desk", name: "Sales desk", release: "1.3.0", requiredApps: [] })).toEqual({ line: "From Sales desk 1.3.0", withdrawn: null });
+    // A bot imported from a file (old records have no source) shows nothing
+    // new: with no organization, Bot settings stays as it was.
+    expect(packageProvenance({ id: "sales-desk", name: "Sales desk", release: "1.3.0", requiredApps: [] })).toBeNull();
+    expect(packageProvenance({ id: "sales-desk", name: "Sales desk", release: "1.3.0", requiredApps: [], source: "file", installId: "f".repeat(32) })).toBeNull();
     const stamp = { id: "sales-desk", name: "Sales desk", release: "1.3.0", requiredApps: [], source: "org" as const, installId: "d".repeat(32),
       publisher: { organizationId: "p", slug: "acme", name: "Acme Partners" } };
     expect(packageProvenance(stamp)).toEqual({ line: "From Sales desk 1.3.0 · Acme Partners", withdrawn: null });

@@ -90,14 +90,15 @@ export function orgContentsLine(contents: OrgLibraryPackage["contents"]): string
   return parts.join(" · ");
 }
 
-/** The line under a bot that came from a package: "From Sales desk 1.3.0 ·
- * Acme Partners", "Withdrawn by Acme Partners" once its publisher pulls it. */
+/** The line under a bot that came from the organization's library: "From
+ * Sales desk 1.3.0 · Acme Partners", "Withdrawn by Acme Partners" once its
+ * publisher pulls it. A bot imported from a file shows nothing new, as before
+ * (contract §5.7: the line is for organization packages). */
 export function packageProvenance(
   stamp: InstalledPackageMetadata | undefined,
   installs: readonly OrgLibraryInstall[] = [],
 ): { line: string; withdrawn: string | null } | null {
-  if (!stamp) return null;
-  if (stamp.source !== "org") return { line: t("orgLibrary.provenanceFile", { name: stamp.name, release: stamp.release }), withdrawn: null };
+  if (stamp?.source !== "org") return null;
   const publisher = stamp.publisher?.name ?? "";
   const install = installs.find((candidate) => candidate.installId === stamp.installId);
   return {

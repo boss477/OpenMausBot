@@ -107,6 +107,9 @@ the fake engine: scope, on-demand token reads, and immediate delegation drain.
 The [cloud preview fixture](cloud-preview.md) mounts the real Computer panel
 against an isolated server for image decoding, loading, and recovery UI checks.
 
+The [VPS recovery fixtures](vps-recovery.md) reproduce preview/startup contention
+and Docker-over-SSH timeout cleanup without contacting a real server.
+
 The [live browser fixture](browser-live.md) mounts the real Browser panel with
 an explicitly selected native engine and Chrome in a disposable home, covering
 watching, takeover, input, and profile switching.

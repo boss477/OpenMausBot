@@ -42,6 +42,7 @@ describe("package export", () => {
           resumeCursors: { provider: "secret-session" },
           chiefOfStaff: true,
           composio: true,
+          connectorTools: { gmail: { tools: "*" } },
           cwd: "/private/path",
           approvalMode: "full",
           autoApprove: true,
@@ -163,7 +164,7 @@ describe("package export", () => {
         agents: [{ skills: ["source-check"] }],
       },
     });
-    expect(JSON.stringify(exported)).not.toMatch(/private-id|private-thread|private-engine|secret-model|secret-session|private\/path|private-attachment|approvalMode|autoApprove|alwaysAllow|nextRunAt/);
+    expect(JSON.stringify(exported)).not.toMatch(/private-id|private-thread|private-engine|secret-model|secret-session|private\/path|private-attachment|approvalMode|autoApprove|alwaysAllow|connectorTools|nextRunAt/);
   });
 
   it.each([

@@ -60,6 +60,8 @@ if (!enabled) console.log("skipping team lifecycle UI e2e: set OMB_UI_E2E=1 to i
       return ui("type", "--ref", ref, "--text", text);
     };
     const snapshot = async () => (await ui("snapshot")).snapshot as string;
+    const evaluate = async (source: string) => (await ui("eval", "--js", source)).result;
+    const focused = () => evaluate("document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent?.trim()");
     const manage = async (name: string) => {
       // Native summary nodes have no refs in the pinned browser snapshot.
       const selector = `[data-team-key=${JSON.stringify(name)}] summary`;
@@ -180,7 +182,7 @@ if (!enabled) console.log("skipping team lifecycle UI e2e: set OMB_UI_E2E=1 to i
     await ui("eval", "--js", `(() => {
       const original = window.fetch.bind(window); window.teamDeleteRequests = 0;
       window.fetch = async (url, init) => {
-        if (String(url).includes('/api/sidebar-sections') && init?.method === 'DELETE') {
+        if (String(url) === '/api/sidebar-sections?section=Launch' && init?.method === 'DELETE') {
           window.teamDeleteRequests++; await new Promise(resolve => { window.releaseTeamDelete = resolve; });
           if (window.teamDeleteRequests === 1) return new Response(JSON.stringify({ error: "Fixture deletion failure" }), { status: 500, headers: { "Content-Type": "application/json" } });
         }
@@ -205,9 +207,96 @@ if (!enabled) console.log("skipping team lifecycle UI e2e: set OMB_UI_E2E=1 to i
     await expect.poll(async () => (await ui("eval", "--js", "window.teamDeleteRequests")).result).toBe(2);
     await ui("eval", "--js", "window.releaseTeamDelete(); true");
     await expect.poll(async () => (await api("/api/bots?messages=0")).sections.includes("Launch")).toBe(false);
+    // The server commits before the pending DELETE response reaches React.
+    // Finish this UI action before the next fixture client creates a section;
+    // otherwise its SSE update can race the previous response's section list.
+    await expect.poll(snapshot).not.toContain('alertdialog "Delete Launch team?"');
+
+    // Section management is available where the section lives, without
+    // requiring the team map. Cancel and Escape must leave its brief intact.
+    await api("/api/sidebar-sections", "POST", { name: "Sidebar empty" });
+    await api("/api/section-context?section=Sidebar%20empty", "PUT", { text: "Keep this until deletion is confirmed." });
+    await click("Delete Sidebar empty section");
+    await expect.poll(snapshot).toContain('alertdialog "Delete Sidebar empty team?"');
+    expect(await focused()).toBe("Cancel");
+    await ui("press", "--keys", "Shift+Tab");
+    expect(await focused()).toBe("Delete team");
+    await ui("press", "--keys", "Tab");
+    expect(await focused()).toBe("Cancel");
+    await ui("press", "--keys", "Escape");
+    await expect.poll(focused).toBe("Delete Sidebar empty section");
+    expect((await api("/api/sidebar-sections")).sections).toContain("Sidebar empty");
+    expect((await api("/api/section-context?section=Sidebar%20empty")).text).toBe("Keep this until deletion is confirmed.");
+    await click("Delete Sidebar empty section");
+    await click("Cancel");
+    await expect.poll(focused).toBe("Delete Sidebar empty section");
+    expect((await api("/api/sidebar-sections")).sections).toContain("Sidebar empty");
+    await click("Delete Sidebar empty section");
+    await click("Delete team");
+    await expect.poll(async () => (await api("/api/sidebar-sections")).sections.includes("Sidebar empty")).toBe(false);
+    await expect.poll(() => evaluate('Boolean(document.querySelector("[data-sidebar-section-id=\\"section:Sidebar empty\\"]"))')).toBe(false);
+    expect((await fetch(`${info.url}/api/section-context?section=Sidebar%20empty`)).status).toBe(404);
+
+    // The visible delete button shares the established keep-members behavior:
+    // active, pinned and archived bots move to General with their chats intact.
+    await control("send", "--bot", a.id, "--text", "Keep this conversation when its sidebar section is deleted.");
+    expect(await control("wait", "--bot", a.id, "--timeout", "30")).toMatchObject({ status: "settled" });
+    const transcript = (await control("messages", "--bot", a.id, "--limit", "10") as any).messages;
+    expect(transcript.length).toBeGreaterThan(0);
+    const deleteSectionByIcon = async (name: string) => {
+      await click(`Delete ${name} section`);
+      await expect.poll(snapshot).toContain(`alertdialog "Delete ${name} team?"`);
+      expect(await focused()).toBe("Cancel");
+      expect(await evaluate("document.querySelector('[role=alertdialog]')?.textContent")).toContain(
+        "Bots and group chats move to General with their conversations intact.",
+      );
+      await click("Delete team");
+      await expect.poll(async () => (await api("/api/sidebar-sections")).sections.includes(name)).toBe(false);
+      await expect.poll(() => evaluate(`Boolean(document.querySelector(${JSON.stringify(`[data-sidebar-section-id="section:${name}"]`)}))`)).toBe(false);
+    };
+    for (const member of [
+      { name: "Sidebar populated", pinned: false, hidden: false },
+      { name: "Sidebar pinned", pinned: true, hidden: false },
+      { name: "Sidebar archived", pinned: false, hidden: true },
+    ]) {
+      await api(`/api/bots/${a.id}`, "PATCH", { hidden: false, pinned: false });
+      await api("/api/sidebar-sections", "POST", { name: member.name, botIds: [a.id] });
+      await api(`/api/bots/${a.id}`, "PATCH", { pinned: member.pinned, hidden: member.hidden });
+      const sectionRow = `[data-sidebar-section-id="section:${member.name}"] [data-sidebar-bot-row="${a.id}"]`;
+      await expect.poll(() => evaluate(`Boolean(document.querySelector(${JSON.stringify(sectionRow)}))`)).toBe(!member.pinned && !member.hidden);
+      if (member.pinned) {
+        await expect.poll(() => evaluate(`Boolean(document.querySelector('[data-sidebar-section-id="builtin:pinned"] [data-sidebar-bot-row="${a.id}"]'))`)).toBe(true);
+      }
+      if (member.hidden) {
+        await expect.poll(() => evaluate(`Boolean(document.querySelector('[data-sidebar-bot-row="${a.id}"]'))`)).toBe(false);
+      }
+      await deleteSectionByIcon(member.name);
+      const survivor = (await api("/api/bots?messages=0")).bots.find((bot: any) => bot.id === a.id);
+      expect(survivor).toMatchObject({ id: a.id, name: a.name, pinned: member.pinned, hidden: member.hidden });
+      expect(survivor.section).toBeUndefined();
+      expect((await control("messages", "--bot", a.id, "--limit", "10") as any).messages).toEqual(transcript);
+    }
+    await api(`/api/bots/${a.id}`, "PATCH", { hidden: false });
+    const group = (await api("/api/groups", "POST", { name: "Sidebar room", memberIds: [a.id, b.id], section: "Sidebar group" })).group;
+    await api(`/api/groups/${group.id}/setup`, "PATCH", { action: "complete", bulletin: "", defaultResponder: { kind: "member", botId: a.id } });
+    await control("send-channel", "--channel", group.id, "--text", "Keep this group conversation when its section is deleted.");
+    expect(await control("wait", "--channel", group.id, "--timeout", "30")).toMatchObject({ status: "settled" });
+    const roomTranscript = (await control("messages", "--channel", group.id, "--limit", "10") as any).messages;
+    expect(roomTranscript.length).toBeGreaterThan(0);
+    await expect.poll(snapshot).toContain("Sidebar room");
+    expect((await api("/api/bots?messages=0")).bots.some((bot: any) => bot.section === "Sidebar group")).toBe(false);
+    await deleteSectionByIcon("Sidebar group");
+    const survivingState = await api("/api/bots?messages=0");
+    expect(survivingState.bots.map((bot: any) => bot.id)).toEqual(expect.arrayContaining([a.id, b.id]));
+    const survivingRoom = survivingState.groups.find((room: any) => room.id === group.id);
+    expect(survivingRoom).toMatchObject({ id: group.id, name: group.name, memberIds: [a.id, b.id], threadId: group.threadId });
+    expect(survivingRoom.section).toBeUndefined();
+    expect((await control("messages", "--channel", group.id, "--limit", "10") as any).messages).toEqual(roomTranscript);
     const consoleResult = await ui("console");
     expect(JSON.stringify(consoleResult)).not.toMatch(/Uncaught|ReferenceError/);
-    console.info(JSON.stringify({ fixture: info!, screenshot, emptyTeam: true, multiBotMove: true, delayedMemberCreation: true, reload: true, renameAndDelete: true }));
+    console.info(JSON.stringify({ fixture: info!, screenshot, emptyTeam: true, multiBotMove: true, delayedMemberCreation: true, reload: true, renameAndDelete: true,
+      sidebarDelete: true, sidebarCancelAndFocus: true, preservedSectionMembers: ["active", "pinned", "archived", "group"],
+      preservedBotMessages: transcript.length, preservedGroupMessages: roomTranscript.length }));
     preview = await mountPreview({ info: { url: info!.url } }, {
       entry: "/scripts/testing/confirm-dialog-preview.tsx", route: "/__confirm-focus.html", title: "Confirmation focus regression", logLevel: "silent",
     });
@@ -232,4 +321,4 @@ if (!enabled) console.log("skipping team lifecycle UI e2e: set OMB_UI_E2E=1 to i
     await waitForExit(child, { signal: "SIGINT", graceMs: 30_000 });
     await preview?.close();
   }
-}, binary ? 360_000 : 720_000);
+}, binary ? 420_000 : 840_000);

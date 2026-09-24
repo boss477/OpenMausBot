@@ -27,6 +27,7 @@ async function installation() {
   const presets = await import("./presets.ts");
   const importer = await import("./package-import.ts");
   const exporter = await import("./package-export.ts");
+  const parts = await import("./package-parts.ts");
   const { parsePackageDocument } = await import("../shared/package-format.ts");
   const store = new Store(() => ({ instanceId: "claude", model: "default-model" }));
   const routines = new RoutineManager({
@@ -61,7 +62,7 @@ async function installation() {
     document.package.publisher = { organization: "acme", name: "Acme Partners" };
     return document;
   };
-  return { store, skills, workspace, presets, importer, exporter, parsePackageDocument, presetStore, presetFile, deps, applyDeps, org, orgDocument };
+  return { store, skills, workspace, presets, importer, exporter, parts, parsePackageDocument, presetStore, presetFile, deps, applyDeps, org, orgDocument };
 }
 
 afterEach(async () => {
@@ -195,16 +196,6 @@ describe("preset store", () => {
     expect(JSON.stringify(after)).not.toMatch(/approvalMode|modelSelection|cwd|computer/);
     expect(app.presetStore.resolve(stored.presets[1].id)).toBeNull();
   });
-
-  it("reads the organization's install statuses from its state file, and nothing from a missing or broken one", async () => {
-    const app = await installation();
-    const file = join(home, "state.json");
-    expect(app.presets.readOrgInstallStatuses(file).size).toBe(0);
-    writeFileSync(file, "{not json");
-    expect(app.presets.readOrgInstallStatuses(file).size).toBe(0);
-    writeFileSync(file, JSON.stringify({ version: 1, installs: { a: { status: "installed" }, b: { status: "withdrawn" }, c: { status: "odd" }, d: null } }));
-    expect([...app.presets.readOrgInstallStatuses(file)]).toEqual([["a", "installed"], ["b", "withdrawn"]]);
-  });
 });
 
 describe("creating a bot from a preset", () => {
@@ -218,6 +209,8 @@ describe("creating a bot from a preset", () => {
     const bot = app.store.createBot({ name: "Sky", modelSelection: { instanceId: "claude", model: "default-model" } });
     expect(app.presets.applyPresetToBot(bot.id, resolved, app.applyDeps)).toEqual({ skills: ["objection-handling"], notes: 2 });
     expect(app.skills.listSkills(bot.id)).toEqual([expect.objectContaining({ name: "objection-handling", enabled: false, source: "package:sales-desk" })]);
+    // A file's skills carry no organization stamp.
+    expect(app.skills.skillPackageStamps(bot.id)).toEqual([]);
     expect(app.workspace.readMemoryFile(bot.id).text).toBe("- Greets by name.\n");
     expect(app.workspace.readMemoryTopic(bot.id, "tone.md")).toBe("Warm.\n");
     const record = app.store.bot(bot.id)!;
@@ -231,14 +224,27 @@ describe("creating a bot from a preset", () => {
     }
   });
 
-  it("adds an organization preset's skills switched on, under the organization's own source", async () => {
+  it("adds an organization preset's skills switched on, under the organization's own source, stamped for updates", async () => {
     const app = await installation();
     const org = app.org();
-    const imported = app.importer.importPackageDocument(app.orgDocument("library-only.v2.json"), { trust: "org", mode: "add", org }, app.deps);
+    const document = app.orgDocument("library-only.v2.json");
+    const imported = app.importer.importPackageDocument(document, { trust: "org", mode: "add", org }, app.deps);
     if (imported.alreadyAdded) throw new Error("unexpected");
     const bot = app.store.createBot({ name: "Sky", modelSelection: { instanceId: "claude", model: "default-model" } });
     app.presets.applyPresetToBot(bot.id, app.presetStore.resolve(imported.presets![0]!.id)!, app.applyDeps);
     expect(app.skills.listSkills(bot.id)).toEqual([expect.objectContaining({ name: "objection-handling", enabled: true, source: "org:acme/sales-skills@2.0.1" })]);
+    // The skill-state stamp an Add writes (contract §3.2), marked as a
+    // preset's: r hashes the skill as stored with the preset (the release's
+    // text), w the SKILL.md as written on the bot (§1.6 `skill:<name>`).
+    const stored = JSON.parse(readFileSync(app.presetFile, "utf8")).content[org.installId].skills
+      .find((skill: { name: string }) => skill.name === "objection-handling").instructions as string;
+    expect(stored).toBe(document.package.skills!.entries.find((skill) => skill.name === "objection-handling")!.instructions);
+    const written = app.skills.readSkillFile(bot.id, "objection-handling")!;
+    expect(app.skills.skillPackageStamps(bot.id)).toEqual([{ name: "objection-handling", enabled: true, stamp: {
+      installId: org.installId, key: "objection-handling", release: "2.0.1", r: app.parts.partHash(stored), w: app.parts.partHash(written), via: "preset",
+    } }]);
+    // Never shown to the renderer or the bot.
+    expect(JSON.stringify(app.skills.listSkills(bot.id))).not.toMatch(/"via"|"package"/);
     expect(app.store.bot(bot.id)!.installedPackage).toEqual({ id: "sales-skills", name: "Sales skills", release: "2.0.1", requiredApps: [],
       source: "org", installId: org.installId, presetKey: "support", publisher: org.publisher, ref: "acme/sales-skills", sha256: org.sha256 });
   });

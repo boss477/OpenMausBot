@@ -105,6 +105,10 @@ export interface SkillPackageStamp {
   release: string;
   r: string;
   w: string;
+  /** Additive to contract §3.2: "preset" when a bot made from one of the
+   * install's presets got it (server/presets.ts). Absent: the install itself
+   * put it there (a team's bot, or an offered skill). */
+  via?: "preset";
 }
 
 interface SkillManifest {
@@ -129,6 +133,7 @@ const skillManifestEntrySchema = z.object({
     release: z.string().min(1).max(40),
     r: z.string().regex(/^[a-f0-9]{64}$/),
     w: z.string().regex(/^[a-f0-9]{64}$/),
+    via: z.literal("preset").optional(),
   }).optional(),
 });
 const skillManifestSchema = z.record(z.string(), skillManifestEntrySchema);

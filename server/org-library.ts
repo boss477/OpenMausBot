@@ -400,6 +400,15 @@ export class OrgLibrary {
     return this.library ? { ...this.library.catalog.organization } : null;
   }
 
+  /** Every install's status, from this library's own state (what it last
+   * rebuilt, added or withdrew, saved or not), for New bot's presets
+   * (presets.ts presetOffered). Every install is listed, whichever
+   * organization it came from and with no organization signed in, as the
+   * statuses have always been read. Reads no file and no skill state. */
+  installStatuses(): Map<string, OrgInstall["status"]> {
+    return new Map(Object.entries(this.state.installs).map(([installId, install]) => [installId, install.status]));
+  }
+
   // ── the relay (Electron main → runtime) ───────────────────────────────
 
   /** `openmausbot:managed-library`: swap the catalog and return at once; the
@@ -483,6 +492,9 @@ export class OrgLibrary {
         value.sections.push(sectionKey(bot.section));
         value.meta ??= stamp;
       }
+      // A bot made from an install's preset (presets.ts) is the person's own,
+      // like a copy: its stamped skills never count as the install's records.
+      if (stamp?.presetKey) continue;
       for (const skill of this.deps.skills.stamps(bot.id)) entry(skill.stamp.installId).skills += 1;
     }
     for (const group of store.groups) {
@@ -723,7 +735,9 @@ export class OrgLibrary {
       }
     }
     // A bot made from one of the install's presets (presets.ts) got the
-    // preset's skills under the release's organization source, unstamped.
+    // preset's skills under the release's organization source. They carry
+    // the install's stamp too (`via: "preset"`, reached above); the source
+    // also reaches one made before presets stamped their skills.
     for (const bot of this.deps.store.bots) {
       const made = bot.installedPackage;
       if (made?.source !== "org" || made.installId !== installId || !made.presetKey || !made.ref) continue;

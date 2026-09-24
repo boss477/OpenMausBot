@@ -107,10 +107,11 @@ it("shares New bot defaults as a preset, imports it, and creates bots from file 
       .toEqual([["org", "Acme Partners"], ["file", undefined]]);
     const fromOrg = await ok("POST", "/api/bots", { name: "Sky 2", useDefaults: false, preset: "org-preset-1" });
     expect((await ok("GET", `/api/bots/${fromOrg.bot.id}/skills`)).skills).toEqual([expect.objectContaining({ name: "follow-up", enabled: true, source: "org:acme/support-agent@1.0.0" })]);
-    // Withdrawn by the publisher: no longer offered or usable.
+    // Whether New bot still offers it is the organization library's state,
+    // not its file: writing state.json under a running app changes nothing.
+    // (A withdrawal through the library is the next test.)
     writeFileSync(join(fixture.info.dataDir, "org-library", "state.json"), JSON.stringify({ version: 1, installs: { [orgRow.installId]: { status: "withdrawn" } } }));
-    expect((await ok("GET", "/api/bot-presets")).presets.map((entry: { source: string }) => entry.source)).toEqual(["file"]);
-    expect(await call("POST", "/api/bots", { name: "Sky 4", useDefaults: false, preset: "org-preset-1" })).toEqual({ status: 404, body: { error: PRESET_UNAVAILABLE_MESSAGE } });
+    expect((await ok("GET", "/api/bot-presets")).presets.map((entry: { source: string }) => entry.source)).toEqual(["org", "file"]);
 
     // Refusals create nothing.
     const before = (await ok("GET", "/api/bots")).bots.length;
@@ -125,7 +126,7 @@ it("shares New bot defaults as a preset, imports it, and creates bots from file 
     expect(await call("DELETE", "/api/bot-presets/org-preset-1")).toEqual({ status: 409, body: { error: ORG_PRESET_REMOVE_MESSAGE } });
     expect(await ok("DELETE", `/api/bot-presets/${fileId}`)).toEqual({ ok: true });
     expect((await call("DELETE", `/api/bot-presets/${fileId}`)).status).toBe(404);
-    expect((await ok("GET", "/api/bot-presets")).presets).toEqual([]);
+    expect((await ok("GET", "/api/bot-presets")).presets.map((entry: { id: string }) => entry.id)).toEqual(["org-preset-1"]);
   } finally {
     await fixture.close();
   }

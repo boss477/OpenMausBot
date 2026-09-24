@@ -19,8 +19,10 @@
 //
 // Trust is where the preset came from, never what it says: skills from an
 // organization preset are added switched on (the organization's Admin
-// published them), skills from a file preset switched off. Starter notes are
-// written once, through the normal memory writers (which scrub secrets).
+// published them) and stamped with their install (contract §3.2, marked
+// `via: "preset"`), skills from a file preset switched off and unstamped.
+// Starter notes are written once, through the normal memory writers (which
+// scrub secrets).
 //
 // There is no confirm step anywhere: choosing a preset in New bot and
 // pressing Create is the decision.
@@ -34,7 +36,8 @@ import { DATA_DIR } from "./config.ts";
 import type { NewBotDefaults } from "./new-bot-defaults.ts";
 import type { ExportablePackageSkill, TeamExportSkip } from "./package-export.ts";
 import type { OrgImportContext } from "./package-import.ts";
-import type { SkillListing } from "./skills.ts";
+import { pair } from "./package-parts.ts";
+import type { SkillListing, SkillPackageStamp } from "./skills.ts";
 import type { InstalledPackageMetadata, Store } from "./store.ts";
 import {
   AGENT_MAX_SKILLS,
@@ -54,8 +57,6 @@ import {
 import { parseSkillMd } from "../shared/skill-md.ts";
 
 export const PRESETS_FILE = join(DATA_DIR, "org-library", "presets.json");
-/** The organization library's state (W2-1, contract §3.4); read only here. */
-export const ORG_LIBRARY_STATE_FILE = join(DATA_DIR, "org-library", "state.json");
 /** What this installation last shared as a preset file (skills + presets, no team). */
 export const PUBLISHED_LIBRARY_FILE = join(DATA_DIR, "published-library.json");
 
@@ -332,27 +333,14 @@ function usedContent(row: StoredPreset, content: InstallContent | undefined): In
   };
 }
 
-// ── the organization's state (W2-1), through one small read ────────────────
+// ── the organization's install statuses (W2-1) ─────────────────────────────
 
+/** An organization install's status (contract §3.4). The map comes from
+ * OrgLibrary.installStatuses() (org-library.ts), the library's own state, so
+ * New bot never disagrees with it. An install it does not know (or no
+ * organization at all) has no entry: that preset is shown like any copy that
+ * stays after sign-out. */
 export type OrgInstallStatus = "installed" | "withdrawn" | "removed";
-
-/** Each organization install's status from `org-library/state.json`
- * (contract §3.4). No file, or an unreadable one, is an empty map: an
- * organization preset is then shown like any copy that stays after sign-out. */
-export function readOrgInstallStatuses(file: string = ORG_LIBRARY_STATE_FILE): Map<string, OrgInstallStatus> {
-  const statuses = new Map<string, OrgInstallStatus>();
-  try {
-    const state = JSON.parse(readFileSync(file, "utf8")) as { installs?: unknown };
-    if (!state.installs || typeof state.installs !== "object" || Array.isArray(state.installs)) return statuses;
-    for (const [installId, value] of Object.entries(state.installs as Record<string, unknown>)) {
-      const status = value && typeof value === "object" ? (value as { status?: unknown }).status : undefined;
-      if (status === "installed" || status === "withdrawn" || status === "removed") statuses.set(installId, status);
-    }
-  } catch {
-    /* no organization state yet */
-  }
-  return statuses;
-}
 
 /** Whether New bot may use this preset: not one from an organization
  * release that was withdrawn or an install that was removed. */
@@ -422,6 +410,8 @@ export interface PresetApplyDeps {
   skills: {
     install(botId: string, source: string, files: Array<{ path: string; content: string }>): SkillListing | { error: string };
     setEnabled(botId: string, name: string, enabled: boolean): SkillListing | { error: string };
+    /** skills.ts installOrgSkill: switched on, with the install's stamp. */
+    installOrg(botId: string, source: string, skillMd: string, stamp: SkillPackageStamp): SkillListing | { error: string };
   };
   memory: {
     writeIndex(botId: string, text: string): void;
@@ -429,14 +419,25 @@ export interface PresetApplyDeps {
   };
 }
 
+/** An organization install id (package-import.ts orgInstallId), the only
+ * kind a skill-state stamp may carry. */
+const ORG_INSTALL_ID = /^[a-f0-9]{32}$/;
+
 /** The preset's content onto a bot that was just created: playbooks, skills
  * (switched on only for an organization preset), starter notes, and the
  * provenance stamp. Persona fields are the caller's: the New bot dialog
  * prefilled them from the preset and the person may have edited them.
- * Throws on failure; the caller removes the half-made bot. */
+ * Throws on failure; the caller removes the half-made bot.
+ *
+ * An organization preset's skills also get the skill-state stamp an Add
+ * writes (contract §3.2: install, skill name, release, and the SKILL.md
+ * hashes as released and as written), so an automatic update can tell the
+ * person's edit from the publisher's change. It is marked `via: "preset"`,
+ * and org-library.ts never counts a preset-made bot toward the install. */
 export function applyPresetToBot(botId: string, resolved: ResolvedPreset, deps: PresetApplyDeps): { skills: string[]; notes: number } {
   const { row, preset } = resolved;
   const org = row.source === "org";
+  const stamped = org && Boolean(row.ref) && ORG_INSTALL_ID.test(row.installId);
   const playbooks = (preset.playbooks ?? []).flatMap((key) => {
     const playbook = resolved.playbooks.find((candidate) => candidate.key === key);
     return playbook ? [{ ...playbook, triggers: [...playbook.triggers] }] : [];
@@ -460,11 +461,18 @@ export function applyPresetToBot(botId: string, resolved: ResolvedPreset, deps: 
     if (!skill) throw new Error(`The preset's skill "${name}" is unavailable`);
     // The organization channel names its own source; a file's is display only.
     const source = org && row.ref ? `org:${row.ref}@${row.release}` : skill.source ?? `package:${row.packageId}`;
-    const added = deps.skills.install(botId, source, [{ path: "SKILL.md", content: skill.instructions }]);
-    if ("error" in added) throw new Error(`The preset's skill "${name}" could not be added: ${added.error}`);
-    if (org) {
-      const enabled = deps.skills.setEnabled(botId, name, true);
-      if ("error" in enabled) throw new Error(`The preset's skill "${name}" could not be switched on: ${enabled.error}`);
+    if (stamped) {
+      // Written verbatim, so the text as written is the text as stored (§1.6 `skill:<name>`).
+      const stamp: SkillPackageStamp = { installId: row.installId, key: skill.name, release: row.release, ...pair(skill.instructions, skill.instructions), via: "preset" };
+      const added = deps.skills.installOrg(botId, source, skill.instructions, stamp);
+      if ("error" in added) throw new Error(`The preset's skill "${name}" could not be added: ${added.error}`);
+    } else {
+      const added = deps.skills.install(botId, source, [{ path: "SKILL.md", content: skill.instructions }]);
+      if ("error" in added) throw new Error(`The preset's skill "${name}" could not be added: ${added.error}`);
+      if (org) {
+        const enabled = deps.skills.setEnabled(botId, name, true);
+        if ("error" in enabled) throw new Error(`The preset's skill "${name}" could not be switched on: ${enabled.error}`);
+      }
     }
     skills.push(name);
   }

@@ -132,8 +132,11 @@ Preset rows in `presets.json` carry their install id too. They are how a
 package of presets and skills (no bots) is recognized again if its
 `state.json` entry is lost, and they give an adopted install its `presets`
 back. They never keep a team added, and neither does a bot someone made from
-one of its presets, so a team the person deleted can be added again; its
-presets are then refreshed in place, never duplicated.
+one of its presets (nor that bot's skills, although they carry the install's
+skill stamp marked `via: "preset"`), so a team the person deleted can be
+added again; its presets are then refreshed in place, never duplicated.
+New bot asks the library for each install's status
+(`OrgLibrary.installStatuses()`), from its state in memory.
 
 The records are the source of truth. `state.json` is rebuilt from them in
 these cases:

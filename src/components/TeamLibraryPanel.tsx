@@ -56,6 +56,8 @@ interface TeamCatalog {
 export interface TeamImportResult {
   name: string;
   members: number;
+  /** Preset bots now in New bot. */
+  presets?: number;
   /** Connection slots created switched off, waiting for their values. */
   connections?: number;
 }
@@ -147,9 +149,9 @@ export function TeamImportDetails({ pending, importedNames }: { pending: Pending
       {(pending.kind === "package" || pending.kind === "backup") && (
         <div className="mt-5 flex flex-wrap gap-2 text-[11.5px] text-ink-secondary">
           {pending.chiefOfStaff && <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><Crown size={13} />{pending.chiefOfStaff} leads</span>}
-          <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><MessageSquare size={13} />{pending.rooms} {pending.rooms === 1 ? "group chat" : "group chats"}</span>
-          <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><BookOpen size={13} />{pending.playbooks} playbooks</span>
-          <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><CalendarClock size={13} />{pending.version === 2 ? t("teamImport.routinesPaused", { count: pending.routines }) : `${pending.routines} paused routines`}</span>
+          {!pending.library && <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><MessageSquare size={13} />{pending.rooms} {pending.rooms === 1 ? "group chat" : "group chats"}</span>}
+          {!(pending.library && !pending.playbooks) && <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><BookOpen size={13} />{pending.playbooks} playbooks</span>}
+          {!pending.library && <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><CalendarClock size={13} />{pending.version === 2 ? t("teamImport.routinesPaused", { count: pending.routines }) : `${pending.routines} paused routines`}</span>}
           {pending.kind === "package" && pending.version !== 2 && <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><Plug size={13} />{pending.apps.length} connections</span>}
           {Boolean(pending.connections?.length) && <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><Plug size={13} />{t("teamImport.connections", { count: pending.connections?.length ?? 0 })}</span>}
           {Boolean(pending.notes) && <span className="flex items-center gap-1.5 rounded-full bg-raised px-3 py-1.5"><NotebookPen size={13} />{t("teamImport.notes", { count: pending.notes ?? 0 })}</span>}
@@ -161,6 +163,12 @@ export function TeamImportDetails({ pending, importedNames }: { pending: Pending
           <div className="font-medium text-ink">{pending.version === 2 ? t("teamImport.skillsOff") : "Included skills — disabled on import"}</div>
           <p className="mt-1 break-words">{pending.skills?.join(", ")}</p>
           <p className="mt-1">{pending.version === 2 ? t("teamImport.skillsReview") : "Review each skill in its bot profile before enabling it. Imported instructions do not run automatically."}</p>
+        </div>
+      )}
+      {pending.library && Boolean(pending.presets?.length) && (
+        <div className="mt-4 rounded-xl border border-hairline px-4 py-3 text-[12.5px] text-ink-secondary">
+          <div className="font-medium text-ink">{t("teamImport.presetList")}</div>
+          <p className="mt-1 break-words">{pending.presets?.join(", ")}</p>
         </div>
       )}
       {Boolean(pending.offeredSkills?.length) && (
@@ -179,7 +187,7 @@ export function TeamImportDetails({ pending, importedNames }: { pending: Pending
           </ul>
         </div>
       )}
-      <div className="mt-6 text-[12px] font-medium text-ink-secondary">Team members</div>
+      {pending.members.length > 0 && <div className="mt-6 text-[12px] font-medium text-ink-secondary">Team members</div>}
       <div className="mt-2 grid grid-cols-1 gap-x-10 md:grid-cols-2">
         {pending.members.map((member, index) => (
           <div key={`${member.name}-${index}`} className="flex min-h-[72px] items-center gap-3 border-b border-hairline/35 px-1 py-3">
@@ -203,6 +211,8 @@ export function TeamImportDetails({ pending, importedNames }: { pending: Pending
         <p>
           {pending.kind === "backup"
             ? `${TEAM_BACKUP_EXCLUSIONS} ${pending.archivedBots ? `${pending.archivedBots} archived bots will remain archived.` : ""}`
+            : pending.library
+            ? t("teamImport.librarySafety")
             : pending.version === 2
             ? t("teamImport.sharedTeamSafety")
             : pending.kind === "package"
@@ -397,6 +407,7 @@ export function TeamLibraryPanel({
         groups?: Group[];
         routines?: Routine[];
         connections?: unknown[];
+        presets?: unknown[];
       };
       for (const bot of response.bots) dispatch({ type: "botAdded", bot });
       for (const group of response.groups ?? []) dispatch({ type: "groupPatched", group });
@@ -408,6 +419,7 @@ export function TeamLibraryPanel({
         name: pending.name,
         members: response.bots.length,
         ...(response.connections?.length ? { connections: response.connections.length } : {}),
+        ...(response.presets?.length ? { presets: response.presets.length } : {}),
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -552,7 +564,9 @@ export function TeamLibraryPanel({
                   ? pending.kind === "backup"
                     ? `${pending.members.length} ${pending.members.length === 1 ? "bot" : "bots"} · ${pending.conversations} ${pending.conversations === 1 ? "conversation" : "conversations"} · portable backup`
                     : pending.kind === "package"
-                    ? pending.version === 2
+                    ? pending.library
+                      ? t("teamImport.library")
+                      : pending.version === 2
                       ? t("teamImport.sharedTeam", { count: pending.members.length })
                       : `${pending.members.length} bots · portable Markdown playbook`
                     : `${pending.members.length} ready-to-load bots`
@@ -594,6 +608,8 @@ export function TeamLibraryPanel({
                 Your {currentBotCount > 0 ? `${currentBotCount} existing ${currentBotCount === 1 ? "bot and its" : "bots and their"}` : "existing"} conversations stay unchanged.
                 {" "}{pending.kind === "backup"
                   ? t("teamImport.backupCopies")
+                  : pending.library
+                  ? t("teamImport.libraryAdds")
                   : t("teamImport.newSection", { name: pending.teamName ?? pending.name })}
               </div>
               <button
@@ -604,7 +620,7 @@ export function TeamLibraryPanel({
                 {importing && <Loader2 size={15} className="animate-spin" />}
                 {importing
                   ? "Importing…"
-                  : pending.kind === "backup" ? "Import backup" : "Add team"}
+                  : pending.kind === "backup" ? "Import backup" : pending.library ? t("teamImport.addPresets") : "Add team"}
               </button>
             </footer>
           </>

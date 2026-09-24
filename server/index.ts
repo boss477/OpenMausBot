@@ -416,8 +416,12 @@ import type { WebhookTrigger } from "../shared/webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills, renderSkillInstructions, selectBundledSkills } from "./skill-library.ts";
 import { installedPlaybookInstructions } from "./installed-playbooks.ts";
-import { createBotPackageExport, createTeamPackageExport, TeamExportError, type ExportablePackageSkill, type TeamExportSkip } from "./package-export.ts";
+import { createBotPackageExport, createLibraryPackageExport, createTeamPackageExport, picture as sharedPicture, TeamExportError, type ExportablePackageSkill, type TeamExportSkip } from "./package-export.ts";
 import { importPackageDocument, importTeamManifest, PackageImportError, type PackageImportDeps, type PackageImportResult } from "./package-import.ts";
+import {
+  applyPresetToBot, createPresetStore, DEFAULTS_PRESET_KEY, PRESET_UNAVAILABLE_MESSAGE,
+  presetFromDefaults, presetOffered, readOrgInstallStatuses, readPublishedLibrary, writePublishedLibrary,
+} from "./presets.ts";
 import { readPublishedTeam, writePublishedTeam } from "./published-teams.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
@@ -517,6 +521,7 @@ import {
 import { json, onJsonBody, parsedBodyOf, readBody } from "./harness/http.ts";
 import { ROUTES, dispatchRoutes } from "./routes/table.ts";
 import { createHostedSlackRoutes } from "./routes/hosted-slack.ts";
+import { createBotPresetRoutes } from "./routes/bot-presets.ts";
 
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
@@ -2522,7 +2527,27 @@ function packageImportDeps(selection: ModelSelection): PackageImportDeps {
       ? broadcast({ kind: "bot", bot: publicBot(event.bot) })
       : broadcast({ kind: "group", group: publicGroupState(event.group) }),
     defaultSelection: () => selection,
+    presets: presetStore,
   };
+}
+
+/** "Include my New bot defaults as a preset" from an export body: the saved
+ * defaults through the allowlist, with the picture the dialog prepared. */
+function defaultsPresetFor(body: Record<string, unknown>, includeNotes: boolean) {
+  const skipped: TeamExportSkip[] = [];
+  let avatar: Exclude<ReturnType<typeof sharedPicture>, string> | null = null;
+  if (body.presetAvatar !== undefined && body.presetAvatar !== null && body.presetAvatar !== "") {
+    const offered = sharedPicture(body.presetAvatar);
+    if (typeof offered === "string") skipped.push({ part: `presets[${DEFAULTS_PRESET_KEY}].bot.appearance.avatar`, reason: offered });
+    else avatar = offered;
+  }
+  const built = presetFromDefaults(cfg.newBotDefaults, {
+    name: typeof body.presetName === "string" ? body.presetName : undefined,
+    description: typeof body.presetDescription === "string" ? body.presetDescription : undefined,
+    includeNotes,
+    avatar,
+  });
+  return { preset: built.value, skipped: [...skipped, ...built.skipped] };
 }
 
 function checkedGroupResponder(value: unknown, memberIds: string[]): GroupDefaultResponder | null {
@@ -2562,6 +2587,8 @@ function checkedMemberIds(value: unknown): { ok: true; memberIds: string[] } | {
   return { ok: true, memberIds };
 }
 let bootSelection = { instanceId: "", model: "" };
+/** Preset bots for New bot, from shared files and the organization (presets.ts). */
+const presetStore = createPresetStore();
 const store = new Store(
   () => bootSelection,
   (selection) => withNewBotEffort(selection, cfg.newBots?.effort, registry.get(selection.instanceId)?.adapter.capabilities.effortLevels),
@@ -12450,6 +12477,7 @@ const workspaceBackupRoutes = createWorkspaceBackupRoutes({
 // Route modules (server/routes/README.md). `workspaceAccess` is assigned at
 // boot, after this line, so the dependency reads it per request.
 ROUTES.push(createHostedSlackRoutes({ bot: (id) => store.bot(id), hostedReady: () => Boolean(workspaceAccess) && entitled("admin") }));
+ROUTES.push(createBotPresetRoutes({ presets: presetStore, orgStatuses: readOrgInstallStatuses }));
 
 const toolResults = new ToolResults();
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
@@ -15570,6 +15598,36 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // than the default JSON limit (the document itself is capped at 4 MB).
       const body = await readBody(req, 8 * 1024 * 1024);
       const profileName = cfg.profile?.name?.trim();
+      if (body.format === "package" && body.version === 2 && body.kind === "library") {
+        // Preset bots and their skills, no team: my New bot defaults as a
+        // preset someone else picks in New bot (presets.ts has the allowlist).
+        const optional = (value: unknown) => (typeof value === "string" ? value : undefined);
+        const built = defaultsPresetFor(body, body.includeMemory === true);
+        try {
+          const exported = createLibraryPackageExport({
+            name: optional(body.name),
+            tagline: optional(body.tagline),
+            summary: optional(body.summary),
+            release: optional(body.release),
+            notes: optional(body.notes),
+            authorName: profileName,
+            published: readPublishedLibrary(),
+            preset: built.preset,
+            skipped: built.skipped,
+          });
+          if (body.dryRun !== true) writePublishedLibrary(exported.published);
+          return json(res, 200, {
+            document: exported.document,
+            filename: exported.filename,
+            redacted: exported.redacted,
+            skipped: exported.skipped,
+            summary: packageSummary(exported.document),
+          });
+        } catch (error) {
+          if (error instanceof TeamExportError) return json(res, error.status, { error: error.message });
+          throw error;
+        }
+      }
       if (body.format === "package" && body.version === 2) {
         // One team, whole, except its chat history (package format v2).
         if (typeof body.team !== "string") return json(res, 400, { error: "Choose a team to share." });
@@ -15584,6 +15642,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const avatars = body.avatars && typeof body.avatars === "object" && !Array.isArray(body.avatars)
           ? body.avatars as Record<string, unknown>
           : undefined;
+        // Off unless asked: New bot defaults are personal until shared.
+        const defaults = body.includeDefaultsPreset === true ? defaultsPresetFor(body, body.includeMemory === true) : null;
         try {
           const exported = createTeamPackageExport({
             team,
@@ -15603,7 +15663,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             memoryByBot: body.includeMemory === true ? new Map(teamBots.map((bot) => [bot.id, starterNotes(bot.id)])) : undefined,
             avatars,
             mcpServers: cfg.mcpServers ?? {},
-            skipped: skills.skipped,
+            skipped: [...skills.skipped, ...(defaults?.skipped ?? [])],
+            preset: defaults?.preset ?? null,
           });
           // A preview (the dialog's live counts) never records keys; saving
           // the file does, so renaming anything later keeps its identity.
@@ -15829,6 +15890,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         skipped: imported.skipped,
         brief: imported.brief,
         notes: imported.notes,
+        presets: imported.presets ?? [],
       });
     }
     m = path.match(/^\/api\/groups\/([\w-]+)\/setup$/);
@@ -16462,10 +16524,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const settings = template.profile;
       if (auth.kind === "session" && !auth.scopes.includes("admin")) {
         const field = clientBotPatchViolation(settings);
-        if (field || template.skills.length || template.routines.length || Object.keys(template.memory).length) {
+        if (field || body.preset !== undefined || template.skills.length || template.routines.length || Object.keys(template.memory).length) {
           return json(res, 403, { error: "Creating a bot with these defaults needs the admin scope" });
         }
       }
+      // A preset (presets.ts) supplies content: playbooks, skills and
+      // starter notes. Name, look and instructions stay the request's own.
+      if (body.preset !== undefined && (typeof body.preset !== "string" || !/^[\w-]{1,64}$/.test(body.preset))) {
+        return json(res, 400, { error: "preset must be a preset id from New bot" });
+      }
+      const resolvedPreset = typeof body.preset === "string" ? presetStore.resolve(body.preset) : null;
+      const preset = resolvedPreset && presetOffered(resolvedPreset.row, readOrgInstallStatuses()) ? resolvedPreset : null;
+      if (body.preset !== undefined && !preset) return json(res, 404, { error: PRESET_UNAVAILABLE_MESSAGE });
       body = { ...body, ...settings, name: settings.name };
       if (settings.approvalMode === "full" || settings.approvalMode === "custom") {
         return json(res, 403, { error: "This approval level requires the desktop permission flow. Use the bot creation dialog or explicitly choose Ask/Auto for API creation." });
@@ -16547,10 +16617,23 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           browserProfile: ordinary.browserProfile || undefined,
           autoApprove: ordinary.approvalMode === "auto",
         });
+        // What the preset brings wins over the saved defaults for the same
+        // skill name or note file.
+        const presetSkills = new Set(preset?.preset.skills ?? []);
+        const presetNotes = new Set(Object.keys(preset?.preset.seed?.memory ?? {}));
         for (const [file, text] of Object.entries(template.memory)) {
+          if (presetNotes.has(file)) continue;
           journalMemoryWrite(bot.id, file, text, { actor: "person", via: "api" });
         }
+        if (preset) {
+          applyPresetToBot(bot.id, preset, {
+            store,
+            skills: { install: installSkill, setEnabled: setSkillEnabled },
+            memory: { writeIndex: writeMemoryFile, writeTopic: writeMemoryTopic },
+          });
+        }
         for (const skill of template.skills) {
+          if (presetSkills.has(skill.name)) continue;
           const parsed = parseSkillMd(skill.text);
           if ("error" in parsed || parsed.name !== skill.name) throw Object.assign(new Error("Skill name does not match its contents"), { status: 400 });
           const installed = installSkill(bot.id, skill.source, [{ path: "SKILL.md", content: skill.text }]);

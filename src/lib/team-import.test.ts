@@ -157,9 +157,18 @@ Create the team.`);
     expect(preview.pictures?.slice(1)).toEqual([null, null]);
   });
 
+  it("previews a preset file (skills and presets, no team) as preset bots for New bot", () => {
+    expect(teamImportPreview(fixture("library-only.v2.json"))).toMatchObject({
+      kind: "package", version: 2, library: true, name: "Sales skills", members: [], rooms: 0, routines: 0, skills: [],
+      presets: ["Support agent"], offeredSkills: ["follow-up"],
+    });
+  });
+
   it("names the problem in a shared team before anything is added", () => {
     expect(() => teamImportPreview(fixture("newer.v3.json"))).toThrow(NEWER_PACKAGE_MESSAGE);
-    expect(() => teamImportPreview(fixture("library-only.v2.json"))).toThrow("This package has no bots");
+    const skillsOnly = fixture("library-only.v2.json");
+    delete skillsOnly.package.presets;
+    expect(() => teamImportPreview(skillsOnly)).toThrow("This file has no bots or preset bots to add.");
     const broken = fixture("full-team.v2.json");
     broken.package.rooms[0].members.push("ghost");
     expect(() => teamImportPreview(broken)).toThrow("Room desk references unknown agent: ghost");

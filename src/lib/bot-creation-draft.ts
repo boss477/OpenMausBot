@@ -2,6 +2,7 @@ import type { NewBotDefaults, BotDefaultsProfile, BotRoutineTemplate } from "../
 import { api, type Bot, type ModelSelection } from "@/state/store";
 import type { BotUpdatePatch } from "@/state/bot-patch-queue";
 import type { Routine, RoutineInput } from "./routines";
+import type { ChosenPreset } from "./bot-presets";
 
 export const EMPTY_BOT_DEFAULTS: NewBotDefaults = { profile: {}, memory: {}, skills: [], routines: [] };
 
@@ -19,6 +20,8 @@ export class BotCreationDraft {
   template: NewBotDefaults;
   consent: Pick<BotUpdatePatch, "confirmFullAccess" | "acknowledgeLocalAuto"> & { acknowledgePeerScope?: boolean } = {};
   routines: Routine[];
+  /** A preset chosen in New bot: the server adds its skills and notes. */
+  preset?: ChosenPreset;
   avatarFile?: File;
   private avatarObjectUrl?: string;
 
@@ -49,6 +52,12 @@ export class BotCreationDraft {
   }
 
   setModel(modelSelection: ModelSelection) { this.patch({ modelSelection }); }
+
+  /** Remember (or forget) the preset New bot started from. */
+  choosePreset(preset: ChosenPreset | undefined) {
+    this.preset = preset;
+    this.changed();
+  }
 
   setMemory(path: string, text: string | null) {
     if (text === null) delete this.template.memory[path];

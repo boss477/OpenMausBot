@@ -31,8 +31,10 @@ export interface PendingTeamImport {
   connections?: Array<{ label: string; url: string; values: number }>;
   /** Starter note files across all bots. */
   notes?: number;
-  /** Preset bot names (not added by this version). */
+  /** Preset bot names; they appear in New bot. */
   presets?: string[];
+  /** Skills and presets, no team (a library package). */
+  library?: boolean;
 }
 
 /** Small client-side preview only; the server remains the trust boundary. */
@@ -111,7 +113,7 @@ function markdownPackage(markdown: string): unknown {
  * preview already names any problem in the file's own words. */
 function sharedTeamPreview(document: PackageDocument, manifest: unknown): PendingTeamImport {
   const pkg = document.package;
-  if (!pkg.agents.length) throw new Error("This package has no bots. Add it from your organization's shelf, or update OpenMausBot.");
+  if (!pkg.agents.length) return libraryPreview(document, manifest);
   const referenced = new Set(pkg.agents.flatMap((agent) => agent.skills ?? []));
   const leader = pkg.team?.leader ? pkg.agents.find((agent) => agent.key === pkg.team?.leader)?.name : undefined;
   return {
@@ -138,6 +140,30 @@ function sharedTeamPreview(document: PackageDocument, manifest: unknown): Pendin
     })),
     notes: pkg.agents.reduce((total, agent) => total + Object.keys(agent.seed?.memory ?? {}).length, 0),
     presets: (pkg.presets ?? []).map((preset) => preset.name),
+  };
+}
+
+/** Skills and preset bots, no team: the presets go to New bot. A file with
+ * skills only has nothing to add here (the server says the same). */
+function libraryPreview(document: PackageDocument, manifest: unknown): PendingTeamImport {
+  const pkg = document.package;
+  if (!pkg.presets?.length) throw new Error("This file has no bots or preset bots to add. Its skills can be added from your organization's shelf.");
+  return {
+    manifest,
+    kind: "package",
+    version: 2,
+    library: true,
+    name: pkg.name,
+    description: pkg.summary,
+    members: [],
+    rooms: 0,
+    playbooks: pkg.playbooks?.length ?? 0,
+    routines: 0,
+    apps: [],
+    skills: [],
+    // A preset brings its own skills; the rest are only offered.
+    offeredSkills: (pkg.skills?.entries ?? []).filter((skill) => !pkg.presets!.some((preset) => preset.skills?.includes(skill.name))).map((skill) => skill.name),
+    presets: pkg.presets.map((preset) => preset.name),
   };
 }
 

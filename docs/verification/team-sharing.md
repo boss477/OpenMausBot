@@ -29,8 +29,9 @@ bot routine plus a group chat goal. It then checks:
   publisher stamp, the slot created as `crm-2` (switched off, empty header
   value) and bound only to the new bot, the brief, notes, Chief, picture and
   group chat default responder restored;
-- a library-only package is refused with the shelf pointer and a version 3
-  file with the "update the app" sentence, creating nothing.
+- a library-only package adds its preset to New bot and no bot
+  ([presets.md](presets.md) covers presets), and a version 3 file is refused
+  with the "update the app" sentence, creating nothing.
 
 A second test in the same file builds a team whose skills cannot all go in
 one file (a bot with 31 skills, and a name two bots hold with different

@@ -4,6 +4,7 @@ import { api, BotEditorStore, useStore, type Bot, type ModelSelection } from "@/
 import { BotCreationDraft, EMPTY_BOT_DEFAULTS } from "@/lib/bot-creation-draft";
 import { createConfiguredBot, preparedBotTemplate } from "@/lib/create-configured-bot";
 import { BOT_ROLES, roleProfilePatch } from "@/lib/bot-roles";
+import { chosenPreset, presetDraftPatch, presetGroups, presetPictureFile, presetSummaryLines, type BotPreset } from "@/lib/bot-presets";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
@@ -23,6 +24,7 @@ import { inputCls } from "./bot-settings/field";
 import { RoutineEditor } from "./RoutinesPage";
 import { FullAccessWarning } from "./FullAccessWarning";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
+import { SharePresetDialog } from "./SharePresetDialog";
 
 const SECTIONS = ["Identity", "Soul", "Skills", "Memory", "Routines", "Access", "Model", "Permissions", "Voice & alerts"] as const;
 type Section = typeof SECTIONS[number];
@@ -237,12 +239,7 @@ function DraftSection({ active, draft, defaultsMode }: { active: Section; draft:
   const { state } = useStore();
   const derived = useBotSettingsDerived(bot);
   if (active === "Identity") return <div className="space-y-4">
-    <label className="block text-[13px] text-ink-secondary">{t("newBot.startingRole")}
-      <select className={cn(inputCls, "mt-1.5")} value="" onChange={event => {
-        const role = BOT_ROLES.find(role => role.id === event.target.value);
-        if (role) draft.patch(roleProfilePatch(role));
-      }}><option value="">{t("newBot.customSettings")}</option>{BOT_ROLES.map(role => <option key={role.id} value={role.id}>{role.title}</option>)}</select>
-    </label>
+    <StartingRole draft={draft} defaultsMode={defaultsMode} />
     <IdentitySection bot={bot} patch={derived.patch} activeState={derived.activeState} mascotMotion={null}
       namePlaceholder={defaultsMode ? t("newBot.randomName") : undefined} />
     <label className="block text-[13px] text-ink-secondary">Team
@@ -259,6 +256,80 @@ function DraftSection({ active, draft, defaultsMode }: { active: Section; draft:
   if (active === "Model") return <ModelSection bot={bot} />;
   if (active === "Permissions") return <PermissionsSection bot={bot} derived={derived} />;
   return <VoiceSection bot={bot} derived={derived} />;
+}
+
+/** Starting role: presets from the organization and imported files first,
+ * then the built-in roles. A preset fills name, look and instructions (all
+ * still editable); its skills and notes are added when the bot is created. */
+function StartingRole({ draft, defaultsMode }: { draft: BotCreationDraft; defaultsMode: boolean }) {
+  const [presets, setPresets] = useState<BotPreset[]>([]);
+  const [loads, setLoads] = useState(0);
+  const [error, setError] = useState("");
+  // The draft's picture came from a preset (so the next preset may replace it).
+  const presetPicture = useRef(false);
+  useEffect(() => {
+    // Defaults are the installation's own; presets are for one new bot.
+    if (defaultsMode) return;
+    let cancelled = false;
+    void api<{ presets: BotPreset[] }>("/api/bot-presets")
+      .then(result => { if (!cancelled) setPresets(result.presets); })
+      // Members and older servers: the built-in roles only.
+      .catch(() => { if (!cancelled) setPresets([]); });
+    return () => { cancelled = true; };
+  }, [defaultsMode, loads]);
+  const chosen = draft.preset ? presets.find(preset => preset.id === draft.preset!.id) : undefined;
+  const choose = async (value: string) => {
+    setError("");
+    const preset = value.startsWith("preset:") ? presets.find(candidate => candidate.id === value.slice("preset:".length)) : undefined;
+    if (!preset) {
+      draft.choosePreset(undefined);
+      const role = BOT_ROLES.find(role => role.id === value);
+      if (role) draft.patch(roleProfilePatch(role));
+      return;
+    }
+    draft.patch(presetDraftPatch(preset));
+    draft.choosePreset(chosenPreset(preset));
+    const picture = presetPictureFile(preset);
+    try {
+      if (picture) {
+        draft.patch({ avatarUrl: await draft.uploadAvatar(picture), avatarCrop: preset.bot.appearance!.avatar!.crop });
+        presetPicture.current = true;
+      } else if (presetPicture.current) {
+        draft.patch({ avatarUrl: "" });
+        presetPicture.current = false;
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+  const remove = async (preset: BotPreset) => {
+    setError("");
+    try {
+      await api(`/api/bot-presets/${encodeURIComponent(preset.id)}`, { method: "DELETE" });
+      if (draft.preset?.id === preset.id) draft.choosePreset(undefined);
+      setLoads(value => value + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+  const roles = BOT_ROLES.map(role => <option key={role.id} value={role.id}>{role.title}</option>);
+  return <div>
+    <label className="block text-[13px] text-ink-secondary">{t("newBot.startingRole")}
+      <select className={cn(inputCls, "mt-1.5")} value={draft.preset ? `preset:${draft.preset.id}` : ""} onChange={event => void choose(event.target.value)}>
+        <option value="">{t("newBot.customSettings")}</option>
+        {presetGroups(presets).map(group => <optgroup key={group.label} label={group.label}>
+          {group.presets.map(preset => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}
+        </optgroup>)}
+        {presets.length ? <optgroup label={t("newBot.builtInRoles")}>{roles}</optgroup> : roles}
+      </select>
+    </label>
+    {chosen && <div className="mt-2 space-y-1 rounded-lg bg-card px-3 py-2.5 text-[12.5px] text-ink-secondary" data-new-bot-preset>
+      {presetSummaryLines(chosen).map((line, index) => <p key={index} className="break-words">{line}</p>)}
+      {chosen.source === "file" && <button type="button" onClick={() => void remove(chosen)}
+        className="mt-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary hover:bg-control hover:text-ink">{t("newBot.presetRemove")}</button>}
+    </div>}
+    {error && <p role="alert" className="mt-2 text-[12.5px] text-danger">{error}</p>}
+  </div>;
 }
 
 function DraftMemory({ draft }: { draft: BotCreationDraft }) {
@@ -291,10 +362,15 @@ function DraftRoutines({ draft }: { draft: BotCreationDraft }) {
 
 export function DefaultBotSettings() {
   const [open, setOpen] = useState(false);
+  const [sharing, setSharing] = useState(false);
   return <>
     <div className="flex items-center justify-between gap-4 py-3"><span className="text-[13px] text-ink">{t("newBot.defaults")}</span>
-      <button type="button" onClick={() => setOpen(true)} className="rounded-lg bg-control px-3 py-1.5 text-[13px] text-ink hover:bg-raised-hover">{t("newBot.edit")}</button>
+      <div className="flex shrink-0 gap-2">
+        <button type="button" onClick={() => setSharing(true)} className="rounded-lg px-3 py-1.5 text-[13px] text-ink-secondary hover:bg-control hover:text-ink">{t("newBot.sharePreset")}</button>
+        <button type="button" onClick={() => setOpen(true)} className="rounded-lg bg-control px-3 py-1.5 text-[13px] text-ink hover:bg-raised-hover">{t("newBot.edit")}</button>
+      </div>
     </div>
     {open && <NewBotDialog defaultsMode onClose={() => setOpen(false)} />}
+    {sharing && <SharePresetDialog onClose={() => setSharing(false)} />}
   </>;
 }

@@ -1,4 +1,5 @@
 import { parseBotPackage, type BotPackageDefinition, type BotPackagePlaybook, type BotPackageSkill, type ParsedBotPackage } from "./bot-package.ts";
+import type { DefaultsPreset, PublishedLibrary } from "./presets.ts";
 import type { PublishedTeam } from "./published-teams.ts";
 import { nextPatchRelease } from "./published-teams.ts";
 import type { Routine } from "./routines.ts";
@@ -23,6 +24,7 @@ import {
   type PackageConnection,
   type PackageDefinition,
   type PackageDocument,
+  type PackagePreset,
   type PackageRoom,
   type PackageRoutine,
   type PackageRoutineSchedule,
@@ -266,7 +268,9 @@ export type TeamExportSkipReason =
   | "skill_changed"
   | "skill_conflict"
   | "bot_skill_limit"
-  | "team_skill_limit";
+  | "team_skill_limit"
+  | "preset_empty"
+  | "preset_skill_conflict";
 
 export interface TeamExportSkip { part: string; reason: TeamExportSkipReason }
 
@@ -308,6 +312,8 @@ export interface TeamExportInput {
   mcpServers?: Readonly<Record<string, unknown>>;
   /** Earlier skips found while gathering inputs (e.g. unreadable skills). */
   skipped?: readonly TeamExportSkip[];
+  /** "Include my New bot defaults as a preset" (presets.ts presetFromDefaults). */
+  preset?: DefaultsPreset | null;
 }
 
 export interface TeamExportResult {
@@ -353,7 +359,8 @@ function stableKeys<T extends { id: string; name: string }>(
   return keys;
 }
 
-function picture(value: unknown): { mime: "image/png" | "image/jpeg" | "image/webp"; data: string } | "picture_invalid" | "picture_too_large" {
+/** A picture the dialog prepared (a data URL), or why it stays out. */
+export function picture(value: unknown): { mime: "image/png" | "image/jpeg" | "image/webp"; data: string } | "picture_invalid" | "picture_too_large" {
   const match = typeof value === "string" ? DATA_URL.exec(value) : null;
   if (!match) return "picture_invalid";
   const bytes = decodeBase64(match[2]!);
@@ -686,6 +693,7 @@ export function createTeamPackageExport(input: TeamExportInput): TeamExportResul
   if (rooms.length) definition.rooms = rooms;
   if (routines.length) definition.routines = routines;
   if (playbooks.length) definition.playbooks = playbooks;
+  if (input.preset) definition.presets = [withPresetSkills(input.preset, packageSkills, skipped)];
   if (packageSkills.size) definition.skills = { version: 1, entries: [...packageSkills.values()].map((skill) => ({ ...skill })) };
   if (connections.length) definition.connections = connections;
 
@@ -719,5 +727,114 @@ export function createTeamPackageExport(input: TeamExportInput): TeamExportResul
         routines: { ...recorded?.routines, ...toRecord(routineKeys, (id) => exportedRoutines.has(routineKeys.get(id)!)) },
       },
     },
+  };
+}
+
+// ── presets: my New bot defaults, with a team or on their own ──────────────
+
+/** Add a preset's skills to the file's skills. A preset never pushes the
+ * team's own skills out: a name the team holds with different content, or
+ * room past the team's 60, leaves that skill out of the preset and says so.
+ * The skill entries never carry whether a skill was switched on; whoever
+ * adds the file decides that by where it came from. */
+function withPresetSkills(
+  value: DefaultsPreset,
+  packageSkills: Map<string, ExportablePackageSkill>,
+  skipped: TeamExportSkip[],
+): PackagePreset {
+  const kept: string[] = [];
+  for (const skill of value.skills) {
+    const part = `presets[${value.preset.key}].skills[${skill.name}]`;
+    const existing = packageSkills.get(skill.name);
+    if (existing) {
+      if (sameSkill(existing, skill)) kept.push(skill.name);
+      else skipped.push({ part, reason: "preset_skill_conflict" });
+      continue;
+    }
+    if (packageSkills.size >= PACKAGE_MAX_SKILLS) {
+      skipped.push({ part, reason: "team_skill_limit" });
+      continue;
+    }
+    const { enabled: _enabled, ...entry } = skill;
+    packageSkills.set(skill.name, entry);
+    kept.push(skill.name);
+  }
+  const { skills: _skills, ...preset } = value.preset;
+  return { ...preset, ...(kept.length ? { skills: kept } : {}) };
+}
+
+export const PRESET_TOO_LARGE_MESSAGE = "This preset is too large to share (4 MB). Leave out starter notes or some skills and try again.";
+
+export interface LibraryExportInput {
+  name?: string;
+  tagline?: string;
+  summary?: string;
+  release?: string;
+  notes?: string;
+  authorName?: string;
+  /** What this installation last shared as a preset file. */
+  published: PublishedLibrary | null;
+  preset: DefaultsPreset | null;
+  skipped?: readonly TeamExportSkip[];
+}
+
+export interface LibraryExportResult {
+  document: PackageDocument;
+  filename: string;
+  redacted: string[];
+  skipped: TeamExportSkip[];
+  /** Persist after a successful (non-preview) export. */
+  published: PublishedLibrary;
+}
+
+/** A library package: preset bots and their skills, no team (contract §1.3
+ * rule 1). Everything a team file promises holds here too: redaction, the
+ * one parser, the 4 MB limit, and a stable package id with the next patch
+ * release suggested. */
+export function createLibraryPackageExport(input: LibraryExportInput): LibraryExportResult {
+  if (!input.preset) throw new TeamExportError("Your New bot defaults are empty. Give them a name, instructions, skills or starter notes first.");
+  const skipped: TeamExportSkip[] = [...(input.skipped ?? [])];
+  const release = input.release?.trim() || nextPatchRelease(input.published?.lastRelease);
+  if (!SEMVER.test(release)) throw new TeamExportError("Use a version like 1.2.3.");
+  const notes = input.notes?.trim();
+  if (notes && notes.length > RELEASE_NOTES_MAX) throw new TeamExportError(`Release notes must be at most ${RELEASE_NOTES_MAX} characters.`);
+  const displayName = (input.name?.trim() || input.preset.preset.name).slice(0, 100).trim();
+  const packageId = input.published?.packageId ?? portableKey(displayName, "preset", new Set());
+  const packageSkills = new Map<string, ExportablePackageSkill>();
+  const preset = withPresetSkills(input.preset, packageSkills, skipped);
+  const definition: PackageDefinition = {
+    id: packageId,
+    release,
+    name: displayName,
+    tagline: input.tagline?.trim() || "A preset bot for OpenMausBot's New bot dialog.",
+    summary: input.summary?.trim() ||
+      "Shared from OpenMausBot. Adds a preset bot to New bot. Its skills arrive switched off; model choices, computers, approval levels and connected apps never travel.",
+    ...(notes ? { notes } : {}),
+    category: "Community",
+    author: { name: input.authorName?.trim() || "OpenMausBot user" },
+    license: "Unspecified",
+    outcomes: ["Start new bots from a shared preset."],
+    setupMinutes: 2,
+    requirements: { apps: [], capabilities: [] },
+    agents: [],
+    presets: [preset],
+  };
+  if (packageSkills.size) definition.skills = { version: 1, entries: [...packageSkills.values()].map((skill) => ({ ...skill })) };
+  const { document: redactedDocument, redacted } = redactPackageSecrets({
+    format: PACKAGE_FORMAT, version: PACKAGE_VERSION, package: definition,
+  } as PackageDocument);
+  let document: PackageDocument;
+  try {
+    document = parsePackageDocument(redactedDocument, { trust: "file" });
+  } catch (error) {
+    if (error instanceof PackageFormatError && error.code === "too_large") throw new TeamExportError(PRESET_TOO_LARGE_MESSAGE);
+    throw new TeamExportError(error instanceof Error ? error.message : "This preset could not be shared.");
+  }
+  return {
+    document,
+    filename: `${document.package.id}-${document.package.release}.openmaus.json`,
+    redacted,
+    skipped,
+    published: { packageId, lastRelease: release },
   };
 }

@@ -4,7 +4,6 @@ import { expect, it } from "vitest";
 
 import { launchVerificationServer } from "../scripts/control-omb.ts";
 import { NEWER_PACKAGE_MESSAGE, parsePackageDocument } from "../shared/package-format.ts";
-import { NO_BOTS_MESSAGE } from "./package-import.ts";
 
 const FIXTURES = join(import.meta.dirname, "..", "shared", "package-fixtures");
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -104,11 +103,12 @@ it("shares one team whole (minus chat history) and imports it back as new, inert
     expect((await ok("GET", `/api/bots/${copyLead.id}/memory/file?path=${encodeURIComponent("memory/pricing.md")}`)).text).toBe("List price 49.\n");
     expect(imported.body.groups[0]).toMatchObject({ name: "Deal desk", bulletin: "Cite sources.", defaultResponder: { kind: "member", botId: copyLead.id } });
 
-    // Other files: a library-only package points at the shelf; a newer file
-    // asks for an update; neither creates anything.
+    // Other files: a library package adds its preset to New bot and no bots
+    // (server/presets.e2e.test.ts covers presets); a newer file asks for an
+    // update; neither creates a bot.
     const before = await ok("GET", "/api/bots");
     const library = await call("POST", "/api/teams/import", JSON.parse(readFileSync(join(FIXTURES, "library-only.v2.json"), "utf8")));
-    expect(library).toEqual({ status: 400, body: { error: NO_BOTS_MESSAGE, code: "no_bots" } });
+    expect(library).toMatchObject({ status: 201, body: { bots: [], section: "", presets: [{ key: "support", name: "Support agent" }] } });
     const newer = await call("POST", "/api/teams/import", JSON.parse(readFileSync(join(FIXTURES, "newer.v3.json"), "utf8")));
     expect(newer).toEqual({ status: 400, body: { error: NEWER_PACKAGE_MESSAGE } });
     expect(await ok("GET", "/api/bots")).toEqual(before);

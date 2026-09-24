@@ -16,7 +16,7 @@ export const PICTURES_BASE64_BUDGET = 2 * 1024 * 1024;
 export type ShareSkipReason =
   | "picture_too_large" | "picture_invalid" | "pictures_budget" | "stdio_server" | "insecure_address"
   | "files_not_shared" | "lead_not_in_group_chat" | "notes_too_large" | "skill_changed"
-  | "skill_conflict" | "bot_skill_limit" | "team_skill_limit";
+  | "skill_conflict" | "bot_skill_limit" | "team_skill_limit" | "preset_empty" | "preset_skill_conflict";
 
 export interface ShareSkip { part: string; reason: ShareSkipReason | string }
 
@@ -31,6 +31,9 @@ export interface ShareChoices {
   skills: "all" | string[];
   includeMemory: boolean;
   avatars?: Record<string, string>;
+  /** "Include my New bot defaults as a preset", with its prepared picture. */
+  includeDefaultsPreset?: boolean;
+  presetAvatar?: string;
   dryRun?: boolean;
 }
 
@@ -94,6 +97,7 @@ export function shareRequestBody(choices: ShareChoices): Record<string, unknown>
     skills: choices.skills,
     includeMemory: choices.includeMemory,
     ...(choices.avatars && Object.keys(choices.avatars).length ? { avatars: choices.avatars } : {}),
+    ...(choices.includeDefaultsPreset ? { includeDefaultsPreset: true, ...(choices.presetAvatar ? { presetAvatar: choices.presetAvatar } : {}) } : {}),
     ...(choices.dryRun ? { dryRun: true } : {}),
   };
 }
@@ -198,6 +202,8 @@ const FIELD_WORDS: Record<string, LocaleKey> = {
  * stay as their path (still readable, never a value). */
 export function describePart(part: string, document?: PackageDocument): string {
   const pkg = document?.package;
+  // A preset's bot fields read like a bot's: presets[x].bot.soul → presets[x].soul.
+  part = part.replace(/^(presets\[[^\]]+\])\.bot\./, "$1.");
   const match = /^(agents|rooms|routines|skills|connections|presets|playbooks)\[([^\]]+)\](?:\.([a-zA-Z]+)(?:\[([^\]]+)\])?)?/.exec(part);
   if (match) {
     const [, list, key, field, item] = match;
@@ -205,8 +211,10 @@ export function describePart(part: string, document?: PackageDocument): string {
       : list === "rooms" ? pkg?.rooms?.find((room) => room.key === key)?.name
       : list === "routines" ? pkg?.routines?.find((routine) => routine.key === key)?.name
       : list === "connections" ? pkg?.connections?.find((connection) => connection.key === key)?.label
+      : list === "presets" ? pkg?.presets?.find((preset) => preset.key === key)?.name
       : undefined;
-    const who = named ?? key!;
+    // The defaults preset left out (empty) has no name in the file to show.
+    const who = named ?? (list === "presets" ? t("teamShare.defaultsPreset") : key!);
     const words = field
       ? (FIELD_WORDS[field] ? t(FIELD_WORDS[field]) : field)
       : list === "connections" ? t("teamShare.field.connection") : list === "skills" ? t("teamShare.field.skill") : undefined;

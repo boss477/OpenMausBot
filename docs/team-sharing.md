@@ -34,6 +34,10 @@ the team name), or from **Templates → Share**.
   notes hold private details about you. Daily logs never go in.
 - **Connector requirements** (which connected apps the team expects), as
   labels only.
+- **Your New bot defaults as a preset**, only when you tick **Include my New
+  bot defaults as a preset**: their name, look, standing instructions, skills
+  and (with starter notes) notes, never their model, folder, computer,
+  approval level or connected apps. See [presets.md](presets.md).
 
 ## What never goes in the file
 
@@ -78,9 +82,12 @@ you already have.
   the rest of the team is added. Finish connections in **Plugins → MCP
   servers**.
 - Starter notes are written once, through the normal memory writer.
-- Preset bots in a file are listed but not added yet.
-- A package with no bots (skills and presets only) is refused with a pointer
-  to the organization shelf, which arrives in a later version.
+- Preset bots in a file appear in **New bot** under **Imported presets**; a
+  bot made from one gets the preset's skills switched off
+  ([presets.md](presets.md)).
+- A preset file (skills and presets, no bots) adds its presets to New bot and
+  nothing else. A file with only skills has nothing to add here and is
+  refused with a pointer to the organization shelf.
 
 If any step fails, everything the import created is removed again.
 
@@ -102,5 +109,8 @@ by bot id) and `dryRun` (count without recording keys). The response is
 `skills: "all"` the export puts in the skills that fit and lists the rest in
 `skipped`; a list of names is shared exactly or refused. Every `400` from a
 version 2 body also carries `choices: {skills}` (every skill name on the
-team's bots), so a client can offer a different choice. A body without
-`version: 2` keeps the original whole-installation Markdown export.
+team's bots), so a client can offer a different choice. `includeDefaultsPreset:
+true` adds the New bot defaults preset, and `kind: "library"` (instead of
+`team`) saves a preset file; both are described in [presets.md](presets.md).
+A body without `version: 2` keeps the original whole-installation Markdown
+export.

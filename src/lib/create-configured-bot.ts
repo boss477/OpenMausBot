@@ -29,10 +29,15 @@ export async function createConfiguredBot(
   const template = await preparedBotTemplate(draft);
   const { chiefOfStaff, managedSections, ...profile } = template.profile;
   if (!profile.name?.trim()) throw new Error("Give the bot a name");
+  // The server adds a chosen preset's skills (switched on only for an
+  // organization's preset) and starter notes; for the same skill name or
+  // note file, the preset's wins over the draft's.
+  const preset = draft.preset;
   const response = await request<{ bot: Bot }>("/api/bots", {
     method: "POST", body: JSON.stringify({ name: profile.name, title: profile.title,
       description: profile.description, modelSelection: profile.modelSelection, section: profile.section,
-      requireAvailableModel: true, useDefaults: false, ...(visibility !== undefined ? { visibility } : {}) }),
+      requireAvailableModel: true, useDefaults: false, ...(visibility !== undefined ? { visibility } : {}),
+      ...(preset ? { preset: preset.id } : {}) }),
   });
   let bot = response.bot;
   const routines: Array<{ id: string; enabled: boolean }> = [];
@@ -58,11 +63,13 @@ export async function createConfiguredBot(
       }
     }
     for (const [path, text] of Object.entries(template.memory)) {
+      if (preset?.notes.includes(path)) continue;
       await request(`/api/bots/${bot.id}/memory/file`, {
         method: "PUT", body: JSON.stringify({ path, text }),
       });
     }
     for (const skill of template.skills) {
+      if (preset?.skills.includes(skill.name)) continue;
       await request(`/api/bots/${bot.id}/skill-template`, { method: "POST", body: JSON.stringify(skill) });
     }
     for (const routine of template.routines) {

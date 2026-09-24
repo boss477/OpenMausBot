@@ -2456,7 +2456,9 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             setTeamFeedback({
               error: false,
               text:
-                (result.members === 1
+                (result.members === 0 && result.presets
+                  ? t("sidebar.presetsImported", { count: result.presets })
+                  : result.members === 1
                   ? t("sidebar.teamImportedOne")
                   : t("sidebar.teamImportedMany", { count: result.members })) +
                 (result.connections ? ` · ${t("sidebar.connectionsToFinish", { count: result.connections })}` : ""),

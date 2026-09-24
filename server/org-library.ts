@@ -202,6 +202,9 @@ const installSchema = z.object({
   connections: z.record(z.string(), z.object({ name: z.string(), r: z.string().regex(HEX64), w: z.string().regex(HEX64) })),
   presets: z.record(z.string(), z.object({ presetId: z.string(), r: z.string().regex(HEX64) })),
   removedLocally: z.array(z.string()).max(1_000),
+  // Additive to §3.4: a removed team's release whose withdrawal has already
+  // switched off the copies it left (offered skills on other bots).
+  withdrawnHandled: z.string().regex(HEX64).optional(),
   addedAt: count,
   updatedAt: count,
 });
@@ -610,16 +613,20 @@ export class OrgLibrary {
 
   /** A release its publisher withdrew: its skills off, its routines paused,
    * its status "withdrawn". Only the transition acts, so a person who
-   * switches something back on afterwards is not overruled again. */
+   * switches something back on afterwards is not overruled again. A team
+   * the person already removed stays "removed", but an offered skill it
+   * left on another bot is switched off too, once. */
   private handleWithdrawn(): boolean {
     if (!this.library) return false;
     let changed = false;
     for (const [installId, install] of Object.entries(this.state.installs)) {
-      if (install.status !== "installed" || this.currentInstallId(install.packageId) !== installId) continue;
+      if (this.currentInstallId(install.packageId) !== installId) continue;
+      if (install.status === "withdrawn" || (install.status === "removed" && install.withdrawnHandled === install.sha256)) continue;
       const entry = this.library.catalog.packages.find((candidate) => candidate.packageId === install.packageId);
       if (!entry?.withdrawnReleases.some((withdrawn) => withdrawn.sha256 === install.sha256)) continue;
       this.switchOff(installId);
-      install.status = "withdrawn";
+      if (install.status === "installed") install.status = "withdrawn";
+      else install.withdrawnHandled = install.sha256;
       install.updatedAt = this.deps.now?.() ?? Date.now();
       changed = true;
     }

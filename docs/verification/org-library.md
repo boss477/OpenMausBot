@@ -55,7 +55,9 @@ checks the following:
 - **Removal (§7.3.7).** Deleting the install's last bot marks it `removed`
   and reports `removed_locally`. Add then works again. It does the same when
   the team's offered skill is still on one of the person's own bots: the
-  skill stays there, and Add brings back all three bots.
+  skill stays there, and Add brings back all three bots. If that release is
+  then withdrawn, the leftover skill is switched off once, and the install
+  stays `removed`.
 - **Skills-only package.** It is registered with no records, and its skills
   are offered per bot. Adding one puts it on, stamped. A duplicate is `409`.
   Withdrawing the package switches that skill off.
@@ -175,7 +177,8 @@ Three review findings were fixed, on macOS (arm64), against disposable
 fixtures only:
 
 - a team stayed "installed" while an offered skill it gave another bot was
-  left, so it could never be added again;
+  left, so it could never be added again (and, once that was fixed, a
+  withdrawal also had to reach the skill such a removed team left behind);
 - a team Add the app stopped partway through was adopted half-built;
 - a bot imported from a file showed a new provenance line, which changed
   Bot settings on an installation with no organization.
@@ -195,6 +198,9 @@ Each of these was mutation-checked, with the named test seen failing:
 - a partial team's routines kept (stopped just before the leader);
 - the brief written after the leader again (stopped after the leader);
 - a skills-only package adopted as a team (the lost `state.json` test);
+- a withdrawal skipping a removed team's leftover skill, and acting on it
+  again after the person switched it back on (the withdrawal test for a
+  removed team);
 - the provenance line shown for a file stamp (`src/lib/org-library.test.ts`).
 
 Not tested: an actual process kill. The stops are simulated by copying the

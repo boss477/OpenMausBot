@@ -463,6 +463,39 @@ describe("adding from the shelf", () => {
     expect(app.readState().installs[installId]).toMatchObject({ status: "installed" });
   });
 
+  it("switches off an offered skill a removed team left behind when its release is withdrawn, once", async () => {
+    const app = await installation();
+    const own = app.store.createBot({ name: "Helper" });
+    const library = app.open();
+    const team = release("full-team.v2.json");
+    app.writeBlob(team.bytes);
+    library.applyRelay(relay(catalog([entry(TEAM_ID, team)])));
+    await library.settled();
+    const added = library.add(TEAM_ID, app.importDeps) as any;
+    const installId = added.value.result.installId;
+    library.addOfferedSkill(own.id, installId, "objection-handling");
+    for (const id of app.store.groups.map((group) => group.id)) app.store.deleteGroup(id);
+    for (const bot of added.value.result.bots) app.store.deleteBot(bot.id);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await library.settled();
+    expect(app.readState().installs[installId].status).toBe("removed");
+
+    const withdrawn = entry(TEAM_ID, team, { release: null, withdrawnReleases: [{ version: "1.3.0", sha256: team.sha256 }] });
+    library.applyRelay(relay(catalog([withdrawn])));
+    await library.settled();
+    expect(app.skills.listSkills(own.id)).toEqual([expect.objectContaining({ name: "objection-handling", enabled: false })]);
+    // The team is still the one the person removed.
+    expect(app.readState().installs[installId]).toMatchObject({ status: "removed", withdrawnHandled: team.sha256 });
+    expect(app.posted.at(-1).packages).toEqual([
+      { packageId: TEAM_ID, release: "1.3.0", sha256: team.sha256, state: "removed", reason: "removed_locally" },
+    ]);
+    // Switched back on by the person, it stays on.
+    app.skills.setSkillEnabled(own.id, "objection-handling", true);
+    library.applyRelay(relay(catalog([withdrawn], { libraryVersion: 4 })));
+    await library.settled();
+    expect(app.skills.listSkills(own.id)[0]!.enabled).toBe(true);
+  });
+
   it("removes a team the app stopped adding halfway, so it can be added again whole", async () => {
     const app = await installation();
     const library = app.open();

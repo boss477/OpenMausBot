@@ -60,8 +60,9 @@ When the catalog lists an added release under `withdrawnReleases`, its
 skills are switched off, its routines are paused, the install is marked
 **withdrawn**, and the bot's provenance line adds "Withdrawn by <publisher>".
 This happens once, on the change. If you switch something back on
-afterwards, it stays on. A package that disappears from the catalog changes
-nothing: copies stay.
+afterwards, it stays on. A team you already removed stays removed, but an
+offered skill it left on another bot is switched off the same way, once. A
+package that disappears from the catalog changes nothing: copies stay.
 
 ## How the catalog arrives
 
@@ -120,7 +121,7 @@ contains names, paths or error text.
 
 | File | Written by | What |
 |---|---|---|
-| `state.json` | runtime | The index of what was added (contract §3.4), plus `kind` and `name` per install, and `adding`: team Adds that have started and not finished. Mode 0600. |
+| `state.json` | runtime | The index of what was added (contract §3.4), plus `kind`, `name` and `withdrawnHandled` per install, and `adding`: team Adds that have started and not finished. Mode 0600. |
 | `blobs/<sha256>.json` | Electron | Release bytes, checked on every read. |
 | `catalog.json` | Electron | The last applied catalog body. The runtime does not read it. |
 | `presets.json` | presets work (W2-4) | Preset bots. |

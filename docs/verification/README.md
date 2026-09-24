@@ -63,6 +63,7 @@ Use only mapped, tested commands:
 - [Teams and shared instructions](teams.md)
 - [Full workspace backups](workspace-backups.md)
 - [Optional company cloud backups](company-backups.md)
+- [Organization library: the desktop channel](desktop-library.md)
 - [Fleet: many workspaces on one server](fleet.md)
 - [Workspaces screen and the fleet agent](workspaces.md)
 - [Hosted workspace sign-in and revocation](hosted-workspaces.md)

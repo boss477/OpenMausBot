@@ -78,6 +78,7 @@ import { buildApplicationMenu } from "./menu.mjs";
 import { createComputerSharing, validateSharedFolders } from "./computer-sharing.mjs";
 import { acquireDataDirLease } from "./data-dir-lease.mjs";
 import { createManagedDesktopClient, createManagedDesktopRelay, createManagedDesktopStore } from "./managed-desktop.mjs";
+import { createOrgLibrary } from "./org-library.mjs";
 import { createCompanyBackups } from "./company-backups.mjs";
 import { createCompanyBackupSchedule } from "./company-backup-schedule.mjs";
 
@@ -274,6 +275,8 @@ let secureCredentials = {};
 let secureCredentialState = null;
 let desktopDataDirLease = null;
 let managedDesktop = null;
+// The organization library channel: catalog and release bytes for the local runtime only.
+let orgLibrary = null;
 let companyBackupController = null;
 let companyBackupState = { busy: false };
 let preparedCompanyRestore = null;
@@ -298,6 +301,8 @@ const serverSupervisor = createServerSupervisor({
     // Re-read the latest account credentials; registration may have completed
     // while the replacement child's health probe was pending.
     syncManagedComposioCredentials();
+    // A restarted runtime has no library catalog until main sends it again.
+    orgLibrary?.runtimeReady();
     if (managedDesktop) void managedDesktop.refresh().catch(() => {});
     routineWake.start();
     // Existing chat windows reconnect in place, preserving unsent drafts.
@@ -971,14 +976,22 @@ function syncPhoneSecretKey(proc) {
 function ensureManagedDesktop() {
   if (managedDesktop) return managedDesktop;
   if (!app.isPackaged || desktopRemoteAccess) throw new Error("Organization sign-in requires the installed desktop app running on this computer.");
-  const store = createManagedDesktopStore({
-    file: path.join(app.getPath("userData"), "company-connection.bin"),
-    encryption: {
-      available: async () => (await safeStorage.isAsyncEncryptionAvailable()) &&
-        (process.platform !== "linux" || safeStorage.getSelectedStorageBackend() !== "basic_text"),
-      encrypt: value => safeStorage.encryptStringAsync(value),
-      decrypt: value => safeStorage.decryptStringAsync(value),
-    },
+  const encryption = {
+    available: async () => (await safeStorage.isAsyncEncryptionAvailable()) &&
+      (process.platform !== "linux" || safeStorage.getSelectedStorageBackend() !== "basic_text"),
+    encrypt: value => safeStorage.encryptStringAsync(value),
+    decrypt: value => safeStorage.decryptStringAsync(value),
+  };
+  const store = createManagedDesktopStore({ file: path.join(app.getPath("userData"), "company-connection.bin"), encryption });
+  // Only what the Admin's library capability delivers, verified in main and
+  // relayed to the local runtime; never to a remote server's pages.
+  orgLibrary = createOrgLibrary({
+    dataDir: path.join(desktopDataDir(), "org-library"),
+    store: createManagedDesktopStore({ file: path.join(app.getPath("userData"), "company-library.bin"), encryption }),
+    fetchBytes: (route, maxBytes, options) => managedDesktop.fetchLibraryBytes(route, maxBytes, options),
+    relay: library => managedDesktopRelay.sendLibrary(serverProc, library),
+    appVersion: app.getVersion(),
+    log: message => slog(message),
   });
   managedDesktop = createManagedDesktopClient({
     store, platform: process.platform, deviceName: os.hostname().slice(0, 100) || "My computer",
@@ -986,6 +999,7 @@ function ensureManagedDesktop() {
     // The organisation's read-only policy overlay; the runtime keeps it in memory.
     applyPolicy: policy => managedDesktopRelay.sendPolicy(serverProc, policy),
     migrateIdentity: identity => managedDesktopRelay.sendIdentity(serverProc, identity),
+    library: orgLibrary,
     appVersion: app.getVersion(),
     openBrowser: url => shell.openExternal(url),
     onState: state => {
@@ -1012,15 +1026,7 @@ function ensureManagedDesktop() {
     },
   });
   companyBackupSchedule = createCompanyBackupSchedule({
-    store: createManagedDesktopStore({
-      file: path.join(app.getPath("userData"), "company-backup-schedule.bin"),
-      encryption: {
-        available: async () => (await safeStorage.isAsyncEncryptionAvailable()) &&
-          (process.platform !== "linux" || safeStorage.getSelectedStorageBackend() !== "basic_text"),
-        encrypt: value => safeStorage.encryptStringAsync(value),
-        decrypt: value => safeStorage.decryptStringAsync(value),
-      },
-    }),
+    store: createManagedDesktopStore({ file: path.join(app.getPath("userData"), "company-backup-schedule.bin"), encryption }),
     scope: companyBackupScope,
     run: async (signal, scope) => {
       if (companyBackupController || preparedCompanyRestore || companyRestoreCommitting || desktopShutdownStarted) throw companyBackupDeferred();
@@ -1277,6 +1283,7 @@ async function startServerOn(port) {
     try {
       if (trustedApprovalMode.receive(proc, message)) return;
       if (managedDesktopRelay.receive(proc, message)) return;
+      if (orgLibrary?.receive(message)) return;
       if (receivePhoneSecretSave(proc, message)) return;
     } catch (error) {
       slog(`desktop private sync rejected: ${error?.message ?? error}`);
@@ -3054,6 +3061,7 @@ app.on("before-quit", (e) => {
   desktopShutdownStarted = true;
   startupScreen?.dispose();
   companyBackupSchedule?.close();
+  orgLibrary?.close();
   managedDesktop?.close();
   companyBackupController?.abort();
   computerSharing?.close();

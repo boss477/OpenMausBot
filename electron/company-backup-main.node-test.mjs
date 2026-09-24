@@ -53,6 +53,8 @@ function fixture() {
     os: { hostname: () => "Fixture computer" }, process: { platform: "fixture" },
     createManagedDesktopStore: () => ({ read: async () => f.savedSchedule, write: async value => { f.savedSchedule = structuredClone(value); } }),
     createManagedDesktopClient: options => { f.onState = options.onState; return client; },
+    // The organization library is wired beside company access; these tests never reach it.
+    createOrgLibrary: () => ({}),
     createCompanyBackupSchedule: options => {
       f.scheduleOptions = options;
       return createCompanyBackupSchedule({ ...options, now: () => f.now,

@@ -2,7 +2,8 @@
 
 **Share team…** saves one team as a single file (`<team>-<version>.openmaus.json`).
 Someone else adds it in **Templates → Import**, or an organization uploads it
-in Admin → Packages. Open it from the team's menu in the sidebar (right-click
+in Admin → Packages and its desktops add it from **Templates → From
+{Organization}** ([org-library.md](org-library.md)). Open it from the team's menu in the sidebar (right-click
 the team name), or from **Templates → Share**.
 
 ## What goes in the file
@@ -80,7 +81,8 @@ you already have.
 - Starter notes are written once, through the normal memory writer.
 - Preset bots in a file are listed but not added yet.
 - A package with no bots (skills and presets only) is refused with a pointer
-  to the organization shelf, which arrives in a later version.
+  to the organization shelf (**Templates → From {Organization}**, see
+  [org-library.md](org-library.md)).
 
 If any step fails, everything the import created is removed again.
 

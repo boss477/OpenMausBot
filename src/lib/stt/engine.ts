@@ -123,6 +123,9 @@ export class Microphone {
           autoGainControl: true,
         },
       });
+      // Gated until attach() hands it a live session: a stop() that ran while
+      // the device was opening must not leave a hot mic behind for the warm hold.
+      for (const track of stream.getAudioTracks()) track.enabled = false;
       if (this.generation !== generation) {
         cleanup();
         return;
@@ -151,6 +154,7 @@ export class Microphone {
       this.stream = stream;
       this.context = context;
       this.node = node;
+      for (const track of stream.getAudioTracks()) track.enabled = this.sink !== null;
     } catch (error) {
       cleanup();
       throw error;

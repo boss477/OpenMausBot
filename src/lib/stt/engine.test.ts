@@ -157,49 +157,54 @@ describe("UniversalSpeechEngine", () => {
   });
 });
 
+/** Stubs getUserMedia / AudioContext / AudioWorkletNode; getUserMedia stays
+ * pending until `resolveMedia()` so tests can race it against close()/attach(). */
+function fakeMediaStack() {
+  let resolveMedia: (stream: unknown) => void = () => {};
+  const mediaPromise = new Promise((resolve) => {
+    resolveMedia = resolve;
+  });
+  const track = { stop: vi.fn(), enabled: true };
+  const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
+
+  const globals = globalThis as unknown as { AudioContext: unknown; AudioWorkletNode: unknown };
+  const originalMediaDevices = navigator.mediaDevices;
+  const originalAudioContext = globals.AudioContext;
+  const originalAudioWorkletNode = globals.AudioWorkletNode;
+
+  Object.defineProperty(navigator, "mediaDevices", {
+    value: { getUserMedia: vi.fn(() => mediaPromise) },
+    configurable: true,
+  });
+  globals.AudioContext = class {
+    sampleRate = 16000;
+    state = "running";
+    audioWorklet = { addModule: vi.fn(async () => {}) };
+    createMediaStreamSource() {
+      return { connect: vi.fn() };
+    }
+    close = vi.fn(async () => {});
+  };
+  globals.AudioWorkletNode = class {
+    port = { onmessage: null, close: vi.fn() };
+    disconnect = vi.fn();
+  };
+
+  return {
+    track,
+    resolveMedia: () => resolveMedia(stream),
+    restore() {
+      Object.defineProperty(navigator, "mediaDevices", { value: originalMediaDevices, configurable: true });
+      globals.AudioContext = originalAudioContext;
+      globals.AudioWorkletNode = originalAudioWorkletNode;
+    },
+  };
+}
+
 describe("Microphone lifecycle", () => {
   it("serializes concurrent open() calls and invalidates in-flight acquisitions on close()", async () => {
     const { Microphone } = await import("./engine");
-    let stopCount = 0;
-    let resolveMedia: (val: unknown) => void;
-    const mediaPromise = new Promise((res) => { resolveMedia = res; });
-
-    const fakeTrack = {
-      stop: vi.fn(() => { stopCount += 1; }),
-      enabled: true,
-    };
-    const fakeStream = {
-      getTracks: () => [fakeTrack],
-      getAudioTracks: () => [fakeTrack],
-    };
-
-    const originalMediaDevices = navigator.mediaDevices;
-    const originalAudioContext = globalThis.AudioContext;
-
-    Object.defineProperty(navigator, "mediaDevices", {
-      value: {
-        getUserMedia: vi.fn(() => mediaPromise),
-      },
-      configurable: true,
-    });
-
-    (globalThis as unknown as { AudioContext: unknown }).AudioContext = class {
-      sampleRate = 16000;
-      state = "running";
-      audioWorklet = {
-        addModule: vi.fn(async () => {}),
-      };
-      createMediaStreamSource() {
-        return { connect: vi.fn() };
-      }
-      close = vi.fn(async () => {});
-    };
-
-    (globalThis as unknown as { AudioWorkletNode: unknown }).AudioWorkletNode = class {
-      port = { onmessage: null, close: vi.fn() };
-      disconnect = vi.fn();
-    };
-
+    const media = fakeMediaStack();
     try {
       const mic = new Microphone();
       const p1 = mic.open();
@@ -208,16 +213,35 @@ describe("Microphone lifecycle", () => {
 
       mic.close();
 
-      resolveMedia!(fakeStream);
+      media.resolveMedia();
       await p1;
 
-      expect(stopCount).toBe(1);
+      expect(media.track.stop).toHaveBeenCalledTimes(1);
     } finally {
-      Object.defineProperty(navigator, "mediaDevices", {
-        value: originalMediaDevices,
-        configurable: true,
-      });
-      (globalThis as unknown as { AudioContext: unknown }).AudioContext = originalAudioContext;
+      media.restore();
+    }
+  });
+
+  it("keeps a stream acquired after stop() gated until a session attaches", async () => {
+    const { Microphone } = await import("./engine");
+    const media = fakeMediaStack();
+    try {
+      const mic = new Microphone();
+      const opening = mic.open();
+      mic.attach(null); // stop() while getUserMedia is still pending
+
+      media.resolveMedia();
+      await opening;
+
+      expect(media.track.stop).not.toHaveBeenCalled(); // warm, not released
+      expect(media.track.enabled).toBe(false);
+
+      mic.attach(() => {});
+      expect(media.track.enabled).toBe(true);
+      mic.attach(null);
+      expect(media.track.enabled).toBe(false);
+    } finally {
+      media.restore();
     }
   });
 });

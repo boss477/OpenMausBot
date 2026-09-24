@@ -38,7 +38,7 @@ async function installation(options: { refuse?: (name: string) => string | undef
   const deps = {
     store,
     routines,
-    skills: { install: skills.installSkill, setEnabled: skills.setSkillEnabled },
+    skills: { install: skills.installSkill, setEnabled: skills.setSkillEnabled, installOrg: skills.installOrgSkill },
     memory: { writeIndex: workspace.writeMemoryFile, writeTopic: workspace.writeMemoryTopic },
     mcp: {
       servers: () => mcp.servers,

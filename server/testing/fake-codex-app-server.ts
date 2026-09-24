@@ -27,6 +27,7 @@
 //   FAKE_CODEX_ASK_HOLD        question modes: record the ask reply and hold the turn open, for
 //                              timeout tests that advance the clock
 //   FAKE_CODEX_DUMP   path to write {pid, argv, env, calls, decision} as JSON
+//   FAKE_CODEX_APPROVAL_REQUEST JSON {method, params} override in approval mode
 //   FAKE_CODEX_ACCOUNT_EMAIL  synthetic ChatGPT identity (default ada@example.test)
 //   FAKE_CODEX_ACCOUNT_MODE   chatgpt (default) | api-key | none | unsupported | error | hang
 //   FAKE_CODEX_RESUME_ERROR   JSON-RPC error object to reject thread/resume
@@ -700,7 +701,10 @@ process.stdin.on("data", (chunk) => {
           });
         } else if (mode === "approval" || mode === "windows-command") {
           const approvalCommand = mode === "windows-command" ? command : "rm -rf scratch";
-          out({ jsonrpc: "2.0", id: 100, method: "execCommandApproval", params: { command: approvalCommand } });
+          const approval = process.env.FAKE_CODEX_APPROVAL_REQUEST
+            ? JSON.parse(process.env.FAKE_CODEX_APPROVAL_REQUEST)
+            : { method: "execCommandApproval", params: { command: approvalCommand } };
+          out({ jsonrpc: "2.0", id: 100, ...approval });
           // turn continues from the approval response handler above
         } else {
           finishTurn();

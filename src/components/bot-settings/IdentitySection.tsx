@@ -15,6 +15,7 @@ import { BotInstructionsDialog } from "../BotInstructionsDialog";
 import { Field, inputCls } from "./field";
 import type { BotPatch } from "./useBotSettingsDerived";
 import { useBotEditor } from "./BotEditorContext";
+import { PackageProvenance } from "./PackageProvenance";
 import { randomBotName } from "@/lib/random-bot-name";
 import { t } from "@/lib/i18n";
 
@@ -38,6 +39,7 @@ export function IdentitySection({
   return (
     <div className="flex flex-col gap-4">
       <BotProfileAvatarCard bot={bot} activeState={activeState} mascotMotion={mascotMotion} onPatch={patch} />
+      <PackageProvenance bot={bot} />
 
       <div>
         <div className="mb-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">

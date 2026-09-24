@@ -20,8 +20,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { mcpServerNameError, MAX_MCP_SERVERS, parseStoredMcpServer } from "./mcp-registry.ts";
+import {
+  AGENT_PARTS, agentReleaseValues, connectionLocalValue, connectionReleaseValue, pair, pairs, playbookValues,
+  ROOM_PARTS, roomReleaseValues, ROUTINE_PARTS, routineReleaseValues, scheduleValue, sha256Hex, TEAM_PARTS,
+  type AgentPart, type PartPair, type TeamPart,
+} from "./package-parts.ts";
 import type { Routine, RoutineInput, RoutineManager } from "./routines.ts";
-import type { SkillListing } from "./skills.ts";
+import type { SkillListing, SkillPackageStamp } from "./skills.ts";
 import type { BotRecord, GroupRecord, InstalledPackageMetadata, Store } from "./store.ts";
 import { importedMemberProfile, type ParsedTeamManifest, type TeamManifestMember } from "./team-manifest.ts";
 import { takeImportName } from "../shared/import-name.ts";
@@ -55,10 +60,13 @@ export interface ImportSkip { part: string; reason: ImportSkipReason }
 
 export interface PackageImportDeps {
   store: Store;
-  routines: Pick<RoutineManager, "create" | "remove">;
+  /** stampInstalledPackage is needed for trust "org" only. */
+  routines: Pick<RoutineManager, "create" | "remove"> & Partial<Pick<RoutineManager, "stampInstalledPackage">>;
   skills: {
     install(botId: string, source: string, files: Array<{ path: string; content: string }>): SkillListing | { error: string };
     setEnabled(botId: string, name: string, enabled: boolean): SkillListing | { error: string };
+    /** The organization path (skills.ts installOrgSkill): switched on, stamped. Needed for trust "org". */
+    installOrg?(botId: string, source: string, skillMd: string, stamp: SkillPackageStamp): SkillListing | { error: string };
   };
   /** Starter notes go through the normal memory writers, which scrub secrets again. */
   memory: {
@@ -103,9 +111,23 @@ export interface PackageImportOptions {
   org?: OrgImportContext;
 }
 
+/** What an organization install created, for DATA_DIR/org-library/state.json
+ * (contract §3.4). Records carry their own stamps; this is the index. */
+export interface OrgInstallIndex {
+  kind: "team" | "library";
+  section: string;
+  team: { parts: Partial<Record<TeamPart, PartPair>> };
+  bots: Record<string, string>;
+  rooms: Record<string, string>;
+  routines: Record<string, string>;
+  connections: Record<string, { name: string; r: string; w: string }>;
+}
+
 export interface PackageImportResult {
   alreadyAdded: false;
   installId?: string;
+  /** trust "org" only. */
+  org?: OrgInstallIndex;
   name: string;
   section: string;
   bots: BotRecord[];
@@ -169,7 +191,8 @@ export function importPackageDocument(
   deps: PackageImportDeps,
 ): ImportResult {
   const pkg = document.package;
-  if (!pkg.agents.length || !pkg.team) throw new PackageImportError("no_bots", NO_BOTS_MESSAGE);
+  const library = !pkg.agents.length || !pkg.team;
+  if (library && options.trust !== "org") throw new PackageImportError("no_bots", NO_BOTS_MESSAGE);
   if (options.trust === "org") {
     const org = options.org;
     if (!org) throw new PackageImportError("invalid_package", "This package is missing its organization details.");
@@ -179,8 +202,27 @@ export function importPackageDocument(
     if (pkg.publisher?.organization !== org.publisher.slug) {
       throw new PackageImportError("invalid_package", "This package was not published by the organization that shared it.");
     }
-    if (deps.store.bots.some((bot) => bot.installedPackage?.installId === org.installId)) {
+    if (org.ref !== `${org.publisher.slug}/${pkg.id}`) {
+      throw new PackageImportError("invalid_package", "This package is not the one your organization listed.");
+    }
+    if (!deps.skills.installOrg || !deps.routines.stampInstalledPackage) {
+      throw new PackageImportError("invalid_package", "This installation cannot add packages from an organization.");
+    }
+    if (deps.store.bots.some((bot) => bot.installedPackage?.installId === org.installId) ||
+        deps.store.groups.some((group) => group.installedPackage?.installId === org.installId)) {
       return { alreadyAdded: true, installId: org.installId };
+    }
+    // A library package (skills and presets, no team) creates no records:
+    // its skills are offered under Bot → Skills, and the organization
+    // library keeps the index of what it offers.
+    if (library) {
+      return {
+        alreadyAdded: false, installId: org.installId, name: pkg.name, section: "", bots: [], groups: [], routines: [],
+        offeredSkills: (pkg.skills?.entries ?? []).map((skill) => skill.name), connections: [],
+        skipped: (pkg.presets ?? []).map((preset) => ({ part: `presets[${preset.key}]`, reason: "presets_not_supported_yet" as const })),
+        brief: false, notes: 0,
+        org: { kind: "library", section: "", team: { parts: {} }, bots: {}, rooms: {}, routines: {}, connections: {} },
+      };
     }
   }
   return runImport({ kind: "package", document }, options, deps);
@@ -212,6 +254,7 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
   const createdRoutines: Routine[] = [];
   const createdServers: string[] = [];
   const skipped: ImportSkip[] = [];
+  const orgIndex: OrgInstallIndex = { kind: "team", section: "", team: { parts: {} }, bots: {}, rooms: {}, routines: {}, connections: {} };
   // Names already in use, hidden bots included: an archived bot can be
   // un-archived later, and a revived duplicate would be just as ambiguous.
   const takenNames = new Set(store.bots.map((bot) => bot.name.trim().toLowerCase()));
@@ -261,6 +304,9 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
         createdServers.push(serverName);
         serverForKey.set(connection.key, serverName);
         connections.push({ key: connection.key, name: serverName, label: connection.label });
+        if (org) {
+          orgIndex.connections[connection.key] = { name: serverName, ...pair(connectionReleaseValue(connection), connectionLocalValue(server)) };
+        }
       }
       if (createdServers.length) deps.mcp.persist(next);
     }
@@ -287,10 +333,12 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
         return playbook ? [{ ...playbook }] : [];
       });
       let avatar: Partial<Pick<BotRecord, "avatarUrl" | "avatarCrop">> = {};
+      let avatarHash: string | null = null;
       if (agent?.appearance.avatar) {
         const bytes = decodeBase64(agent.appearance.avatar.data);
         if (!bytes) throw new Error(`The picture for ${member.name} could not be read`);
         avatar = { avatarUrl: deps.images.save(bytes, agent.appearance.avatar.mime), avatarCrop: agent.appearance.avatar.crop };
+        avatarHash = sha256Hex(bytes);
       }
       const installed: InstalledPackageMetadata | undefined = pkg
         ? {
@@ -321,13 +369,34 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
         if (!skill) throw new Error(`Package skill "${skillName}" is unavailable`);
         // A file's `source` is display provenance only; the organization
         // channel names its own source so ownership can never be forged.
-        const skillSource = org ? `org:${org.ref}@${pkg!.release}` : skill.source ?? `package:${pkg!.id}`;
-        const added = deps.skills.install(created.id, skillSource, [{ path: "SKILL.md", content: skill.instructions }]);
+        // Organization skills arrive switched on, stamped with their install.
+        const added = org
+          ? deps.skills.installOrg!(created.id, `org:${org.ref}@${pkg!.release}`, skill.instructions,
+              { installId: org.installId, key: skill.name, release: pkg!.release, ...pair(skill.instructions, skill.instructions) })
+          : deps.skills.install(created.id, skill.source ?? `package:${pkg!.id}`, [{ path: "SKILL.md", content: skill.instructions }]);
         if ("error" in added) throw new Error(`Package skill "${skillName}" could not be imported: ${added.error}`);
-        if (org) {
-          const enabled = deps.skills.setEnabled(created.id, skillName, true);
-          if ("error" in enabled) throw new Error(`Package skill "${skillName}" could not be switched on: ${enabled.error}`);
-        }
+      }
+      if (org && agent) {
+        const written = store.bot(created.id)!;
+        const local: Record<AgentPart, unknown> = {
+          name: written.name,
+          title: written.title ?? "",
+          description: written.description ?? "",
+          soul: written.soul ?? "",
+          look: {
+            color: written.color,
+            mascotExpression: written.mascotExpression ?? null,
+            mascotBody: written.mascotBody ?? null,
+            avatar: avatarHash,
+            crop: written.avatarCrop ?? null,
+          },
+          playbooks: playbookValues(written.playbooks ?? []),
+          skills: [...(agent.skills ?? [])].sort(),
+          connections: [...(written.mcpServers ?? [])].sort(),
+          approval: "ask",
+        };
+        store.patchBot(created.id, { packageBase: pairs(AGENT_PARTS, agentReleaseValues(agent, playbookByKey), local) });
+        orgIndex.bots[member.key] = created.id;
       }
       // Starter notes are copied once, on this first add.
       for (const [path, text] of Object.entries(agent?.seed?.memory ?? {})) {
@@ -353,6 +422,18 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
         setupCompletedAt: Date.now(),
       }) ?? created;
       groupIds.set(room.key, created.id);
+      if (org) {
+        const local = {
+          name: created.name,
+          bulletin: created.bulletin ?? "",
+          members: [...created.memberIds].sort(),
+          defaultResponder: created.defaultResponder,
+        };
+        created = store.patchGroup(created.id, {
+          installedPackage: { installId: org.installId, key: room.key, memberKeys: [...room.members].sort(), parts: pairs(ROOM_PARTS, roomReleaseValues(room), local) },
+        }) ?? created;
+        orgIndex.rooms[room.key] = created.id;
+      }
     }
 
     for (const routine of pkg?.routines ?? []) {
@@ -377,12 +458,31 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
         ...(routine.overlap ? { overlap: routine.overlap } : {}),
         ...(routine.continuity && routine.room === undefined ? { continuity: true } : {}),
       };
-      createdRoutines.push(deps.routines.create(input));
+      const created = deps.routines.create(input);
+      createdRoutines.push(created);
+      if (org) {
+        const local = {
+          name: created.name,
+          prompt: created.prompt,
+          schedule: scheduleValue(created),
+          target: { botId: created.botId, groupId: created.groupId ?? null },
+        };
+        deps.routines.stampInstalledPackage!(created.id, { installId: org.installId, key: routine.key, parts: pairs(ROUTINE_PARTS, routineReleaseValues(routine), local) });
+        orgIndex.routines[routine.key] = created.id;
+      }
     }
 
     if (pkg?.team?.leader) store.setChiefOfStaff(botIds.get(pkg.team.leader)!);
     const brief = Boolean(pkg?.team?.brief?.trim());
     if (brief) deps.sections.writeBrief(section, pkg!.team!.brief!);
+    if (org && pkg?.team) {
+      orgIndex.section = section;
+      orgIndex.team.parts = pairs(TEAM_PARTS, {
+        name: pkg.team.name, brief: pkg.team.brief ?? "", leader: pkg.team.leader ?? null,
+      }, {
+        name: section, brief: brief ? pkg.team.brief! : "", leader: pkg.team.leader ? botIds.get(pkg.team.leader)! : null,
+      });
+    }
     for (const preset of pkg?.presets ?? []) skipped.push({ part: `presets[${preset.key}]`, reason: "presets_not_supported_yet" });
 
     // The legacy project room is created last, so a failure anywhere above
@@ -405,6 +505,7 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
     return {
       alreadyAdded: false,
       ...(installId ? { installId } : {}),
+      ...(org ? { org: orgIndex } : {}),
       name,
       section,
       bots,

@@ -16,8 +16,11 @@ the team name), or from **Templates → Share**.
   holds at most 30 skills per bot and 60 per team, and one skill per name.
   When you have not chosen, the dialog puts in what fits (switched-on skills
   first) and lists the rest under **Left out**, including a name two bots
-  hold with different content. When you tick more than fits, it says why and
-  keeps every skill box so you can change the choice.
+  hold with different content. The skill boxes then start ticked on what
+  went in, less any skill a bot had to leave out over its 30 (even when
+  another bot's copy went in), so unticking any box is always a choice that
+  fits. When you tick more than fits, it says why and keeps every skill box
+  so you can change the choice.
 - **Playbooks**, **group chats** (members and who answers by default) and the
   team's **shared instructions**.
 - **Routines**, including group chat goals. They always arrive paused.
@@ -25,11 +28,18 @@ the team name), or from **Templates → Share**.
 - **Connections.** For each remote MCP server a bot uses: its address and the
   names of the values it needs (for example `Authorization`). The values
   themselves never travel. Hosted servers often keep their key in the address
-  itself, so an address loses any sign-in part and `#fragment`, keeps its
-  query names with the values emptied (`?key=`), and has every path segment
-  that looks like a key (long, letters and digits mixed, such as a token or
-  a server id) replaced with `redacted`. The dialog lists each connection's
-  full address before you save, and names any address it changed.
+  itself, so an address loses any sign-in part and `#fragment`, and keeps its
+  query and `;matrix` parameter names with the values emptied (`?key=`,
+  `;key=`, and `key=` inside a path segment). Any path segment, parameter
+  name or subdomain label (anything left of the last two host labels) that
+  looks like a key is replaced with `redacted`. A part looks like a key when,
+  after `%XX` escapes are decoded, it holds a run of 16 or more letters,
+  digits, `-` or `_` that mixes letters and digits, or 24 or more letters or
+  digits in a row, such as a token, a hex key or a server id. Words joined by
+  hyphens with a short number, such as `github-mcp-server-2024`, stay as
+  they are. The rule is deliberately broad, so the dialog lists each
+  connection's full address before you save and names any address it
+  changed.
 - **Starter notes.** Each bot's `MEMORY.md` and topic notes. **Include
   starter notes** is ticked, because a team is shared whole; untick it if the
   notes hold private details about you. Daily logs never go in.

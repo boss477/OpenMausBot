@@ -13,7 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { BotVisibility, CloudBackend, EffortLevel, ServerFrame, GroupThreadUsage, SteerQueueReason } from "../../shared/wire";
+import type { BotVisibility, CloudBackend, EffortLevel, InstalledPackageMetadata, ServerFrame, GroupThreadUsage, SteerQueueReason } from "../../shared/wire";
 import type { TurnDigest } from "../../shared/digest";
 import type { ModelVariantOption, RuntimeEvent } from "../../shared/runtime-events";
 import type { MausColor, MausMotion } from "@/lib/mascot";
@@ -94,6 +94,8 @@ export interface OptionCardData {
   /** the narrow grant "always allow" remembers, e.g. "Bash:git" */
   allowKey?: string;
   allowSession?: boolean;
+  /** Exact provider command eligible for a durable, folder-scoped allow. */
+  commandAllowlist?: { command: string; cwd: string; providerInstanceId: string };
   approvalScope?: "local-computer";
   /** Persisted proposal used by the server when the user confirms it. */
   routineRequest?: RoutineRequestCardData;
@@ -426,6 +428,8 @@ export interface Bot {
   browserProfile?: string | null;
   /** Who may see this bot on a shared workspace; only admins receive it. */
   visibility?: BotVisibility;
+  /** Where a shared or organization package put this bot (its provenance line). */
+  installedPackage?: InstalledPackageMetadata;
   messages: Message[];
   /** The server answered a bounded page and older messages remain in storage.
    * Absent on an unpaged response, which always carries the whole thread. */
@@ -1080,6 +1084,8 @@ export type Action =
       alwaysAllow?: { botId: string; key: string };
       /** "Always allow this session": the provider keeps the allow */
       always?: boolean;
+      /** Remember the server-validated exact command and answer atomically. */
+      rememberCommand?: boolean;
       /** Local UI recovery hook for voice flows. Never sent to the server. */
       onError?: (message: string) => void;
     }
@@ -3082,6 +3088,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 message: action.message,
                 reviewedSha256: action.reviewedSha256,
                 always: action.always,
+                rememberCommand: action.rememberCommand,
               }),
             });
           void waitForExecutionSettings(executionBotsBeforeAction, action.threadId)

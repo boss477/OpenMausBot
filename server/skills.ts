@@ -93,6 +93,18 @@ interface SkillManifestEntry {
   /** Immutable workspace revision selected by the protected manifest. Older
    * skills omit this and continue to use skills/<name>. */
   storageRevision?: string;
+  /** Organization library only: which install added it, and the SKILL.md
+   * hashes as released and as written. Never exposed to agents or clients. */
+  package?: SkillPackageStamp;
+}
+
+export interface SkillPackageStamp {
+  installId: string;
+  /** The skill's name in the package. */
+  key: string;
+  release: string;
+  r: string;
+  w: string;
 }
 
 interface SkillManifest {
@@ -111,6 +123,13 @@ const skillManifestEntrySchema = z.object({
   skippedFiles: z.array(z.string()),
   appliedStageId: z.string().optional(),
   storageRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  package: z.object({
+    installId: z.string().regex(/^[a-f0-9]{32}$/),
+    key: z.string().min(1).max(64),
+    release: z.string().min(1).max(40),
+    r: z.string().regex(/^[a-f0-9]{64}$/),
+    w: z.string().regex(/^[a-f0-9]{64}$/),
+  }).optional(),
 });
 const skillManifestSchema = z.record(z.string(), skillManifestEntrySchema);
 const managedLinksSchema = z.array(z.string());
@@ -547,7 +566,7 @@ function skillContentMatches(botId: string, name: string, entry: SkillManifestEn
 }
 
 function skillListing(botId: string, name: string, entry: SkillManifestEntry): SkillListing {
-  const { appliedStageId, storageRevision: _storageRevision, ...visible } = entry;
+  const { appliedStageId, storageRevision: _storageRevision, package: _package, ...visible } = entry;
   const intact = skillContentMatches(botId, name, entry);
   return {
     name,
@@ -611,6 +630,30 @@ export function installSkill(
   const prepared = preparedSkillFiles(files);
   if ("error" in prepared) return prepared;
   return installPreparedSkill(botId, source, prepared, { enabled: false });
+}
+
+/** The organization library's path: a skill the organization's Admin
+ * published arrives switched ON (the Admin is the review), with the install
+ * stamp that lets the library find it again. `source` is chosen by the
+ * caller (`org:<ref>@<release>`), never read from the package. */
+export function installOrgSkill(
+  botId: string,
+  source: string,
+  skillMd: string,
+  stamp: SkillPackageStamp,
+): SkillListing | { error: string } {
+  if (!source.startsWith("org:")) return { error: "organization skills need an org: source" };
+  const prepared = preparedSkillFiles([{ path: "SKILL.md", content: skillMd }]);
+  if ("error" in prepared) return prepared;
+  if (prepared.parsed.name !== stamp.key) return { error: `the skill is named "${prepared.parsed.name}", not "${stamp.key}"` };
+  return installPreparedSkill(botId, source, prepared, { enabled: true, package: { ...stamp } });
+}
+
+/** A bot's skills that an organization install added, with their stamps. */
+export function skillPackageStamps(botId: string): Array<{ name: string; enabled: boolean; stamp: SkillPackageStamp }> {
+  return Object.entries(readManifest(botId)).flatMap(([name, entry]) => entry.package
+    ? [{ name, enabled: entry.enabled, stamp: { ...entry.package } }]
+    : []);
 }
 
 export function setSkillEnabled(botId: string, name: string, enabled: boolean): SkillListing | { error: string } {
@@ -995,7 +1038,7 @@ function installPreparedSkill(
   botId: string,
   source: string,
   prepared: PreparedSkillFiles,
-  options: { enabled: boolean; appliedStageId?: string },
+  options: { enabled: boolean; appliedStageId?: string; package?: SkillPackageStamp },
 ): SkillListing | { error: string } {
   const name = prepared.parsed.name;
   const manifest = readManifest(botId);
@@ -1023,6 +1066,7 @@ function installPreparedSkill(
     warnings: prepared.warnings,
     skippedFiles: prepared.skippedFiles,
     appliedStageId: options.appliedStageId,
+    ...(options.package ? { package: options.package } : {}),
   };
   const root = ensureSkillsRoot(botId);
   if (!root) return { error: "the workspace skills path must be a real directory, not a symlink or file" };

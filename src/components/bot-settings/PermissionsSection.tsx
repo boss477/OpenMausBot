@@ -15,9 +15,12 @@ import { useState } from "react";
 import { Crown } from "lucide-react";
 
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
 import { useStore, type Bot } from "@/state/store";
 import type { ApprovalMode } from "../../../shared/approval-mode";
 import { ApprovalModeSelector } from "../ApprovalModeSelector";
+import { CommandAllowlistDialog } from "../CommandAllowlistDialog";
 import { FullAccessWarning } from "../FullAccessWarning";
 import { LocalComputerAutoWarning } from "../LocalComputerAutoWarning";
 import { Switch } from "../SettingsPrimitives";
@@ -34,10 +37,12 @@ export function PermissionsSection({
 }) {
   const { patch, engine, canCoordinate, approvalMode, trustedModesAvailable, sectionName, currentChief } = derived;
   const { state, dispatch } = useStore();
+  const ownerOrAdmin = useOwnerOrAdmin();
   const { draft } = useBotEditor();
   const [localAutoWarning, setLocalAutoWarning] = useState<string | null>(null);
   const [fullAccessTarget, setFullAccessTarget] = useState<string | null>(null);
   const [allThreads, setAllThreads] = useState(true);
+  const [commandAllowlistTarget, setCommandAllowlistTarget] = useState<{ botId: string; botName: string } | null>(null);
   const setApprovalMode = (mode: ApprovalMode) => {
     if (bot.busy || mode === approvalMode) return;
     if (mode === "full") {
@@ -137,6 +142,7 @@ export function PermissionsSection({
             wide
             disabled={Boolean(bot.busy)}
             trustedModesAvailable={trustedModesAvailable}
+            onManageCommandAllowlist={!draft && ownerOrAdmin === true ? () => setCommandAllowlistTarget({ botId: bot.id, botName: bot.name }) : undefined}
           />
         </div>
         {!draft && approvalMode === "full" && trustedModesAvailable && <button
@@ -144,8 +150,18 @@ export function PermissionsSection({
           className="mt-3 text-[13px] text-accent hover:underline disabled:opacity-40"
           onClick={() => { setAllThreads(true); setFullAccessTarget(bot.id); }}
         >Apply Full access to all threads</button>}
+        {!draft && ownerOrAdmin === true && <button
+          type="button"
+          className="mt-3 block text-[13px] text-accent hover:underline"
+          onClick={() => setCommandAllowlistTarget({ botId: bot.id, botName: bot.name })}
+        >{t("commandAllowlist.manage")}</button>}
       </div>
 
+      {commandAllowlistTarget && <CommandAllowlistDialog
+        key={commandAllowlistTarget.botId}
+        {...commandAllowlistTarget}
+        onClose={() => setCommandAllowlistTarget(null)}
+      />}
       <LocalComputerAutoWarning
         open={localAutoWarning !== null}
         onCancel={() => setLocalAutoWarning(null)}

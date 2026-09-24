@@ -27,6 +27,7 @@ import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts"
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
 import { isMentionBoundary, isMentionNameContinuation } from "../shared/mention-boundary.ts";
 import type { HandedState } from "./delta-context.ts";
+import type { AgentPart, PartPair, RoomPart } from "./package-parts.ts";
 import type {
   BotActivity, GroupDefaultResponder, GroupTask as GroupTaskRecord, MausColor,
   ConnectorToolGrant, OptionCardData, TaskClosedBy, TaskOpenedBy, TaskUsage, WireBot, WireGroup,
@@ -45,11 +46,21 @@ export type { InstalledPlaybook, InstalledPackageMetadata, MausColor, MausExpres
 /** One transcript line, serialized as stored — the shared wire shape. */
 export type Message = WireMessage;
 
+/** Server-private: a group chat added from the organization's library, with
+ * its package key, member keys and per-part hashes (server/package-parts.ts). */
+export interface GroupPackageStamp {
+  installId: string;
+  key: string;
+  memberKeys: string[];
+  parts: Record<RoomPart, PartPair>;
+}
+
 /** A room record excludes working state and ledger usage, both computed by
  * publicGroupState at projection time. */
-export type GroupRecord = Omit<WireGroup, "working" | "usage">;
-/** Groups keep no private fields; projection adds computed display fields. */
-export type GroupWireProjection = GroupRecord & Pick<WireGroup, "usage"> & { working: boolean };
+export type GroupRecord = Omit<WireGroup, "working" | "usage"> & { installedPackage?: GroupPackageStamp };
+/** The one private field is stripped; projection adds computed display fields. */
+export type GroupWirePrivateKeys = "installedPackage";
+export type GroupWireProjection = Omit<GroupRecord, GroupWirePrivateKeys> & Pick<WireGroup, "usage"> & { working: boolean };
 export type GroupWireProjectionIsExact = AssertExact<WireGroup, GroupWireProjection> & AssertSameKeys<WireGroup, GroupWireProjection>;
 export const groupWireProjectionIsExact: GroupWireProjectionIsExact = true;
 
@@ -159,6 +170,10 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     if (typeof card.summary === "string") card.summary = redactSecretsInText(card.summary);
     if (typeof card.held === "string") card.held = redactSecretsInText(card.held);
     if (typeof card.answeredText === "string") card.answeredText = redactSecretsInText(card.answeredText);
+    if (card.commandAllowlist && (
+      redactSecretsInText(card.commandAllowlist.command) !== card.commandAllowlist.command ||
+      redactSecretsInText(card.commandAllowlist.cwd) !== card.commandAllowlist.cwd
+    )) delete card.commandAllowlist;
     // Bot-authored question text sits behind the subtitle the same way a
     // routine's instructions do, so it is scrubbed on the same boundary.
     if (card.questionRequest) {
@@ -370,6 +385,9 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
   lastProfileRequestId?: string;
   /** Receipt committed with a reviewed team batch; prevents replay after a lost response. */
   lastTeamSetupReceipt?: { requestId: string; result: TeamSetupResult };
+  /** Organization library only: each part's release and written hashes
+   * (server/package-parts.ts), for the later automatic update. */
+  packageBase?: Partial<Record<AgentPart, PartPair>>;
 }
 
 /** BotRecord fields no client may see, plus the two the projection
@@ -377,7 +395,7 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
  * WireTask[], avatarUrl is coerced to always-present). The exactness
  * assertion fails to compile when either side drifts, so a new server
  * field forces a decision — wire-visible or private here. */
-export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt";
+export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt" | "packageBase";
 export type BotWireProjection = Pick<BotRecord, Exclude<keyof BotRecord, BotWirePrivateKeys>>;
 export type BotWireProjectionIsExact = AssertExact<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection> & AssertSameKeys<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection>;
 export const botWireProjectionIsExact: BotWireProjectionIsExact = true;
@@ -1130,7 +1148,7 @@ export class Store {
     );
   }
 
-  patchGroup(id: string, patch: Partial<Pick<GroupRecord, "name" | "memberIds" | "defaultResponder" | "bulletin" | "unread" | "busyBotId" | "cwd" | "pinnedMessageId" | "section" | "setupCompletedAt" | "setupSkippedAt" | "audienceFloor">>): GroupRecord | null {
+  patchGroup(id: string, patch: Partial<Pick<GroupRecord, "name" | "memberIds" | "defaultResponder" | "bulletin" | "unread" | "busyBotId" | "cwd" | "pinnedMessageId" | "section" | "setupCompletedAt" | "setupSkippedAt" | "audienceFloor" | "installedPackage">>): GroupRecord | null {
     const group = this.group(id);
     if (!group) return null;
     if (Object.prototype.hasOwnProperty.call(patch, "section")) {

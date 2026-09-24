@@ -112,6 +112,10 @@ export type RuntimeEvent = RuntimeEventBase &
         requestType: "permission" | "question";
         tool: string;
         summary: string;
+        /** Complete native shell input and its effective working directory.
+         * Used for exact-command grants; never reconstructed from a display
+         * summary, tool title, or argv. Absent when either value is unknown. */
+        command?: { command: string; cwd: string };
         choices?: string[];
         /** A provider's structured ask (Claude's AskUserQuestion): the whole
          * set of questions, each with its own options, so the card can offer

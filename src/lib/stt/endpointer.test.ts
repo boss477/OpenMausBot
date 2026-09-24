@@ -49,7 +49,7 @@ describe("Endpointer", () => {
     feed(e, QUIET, 400);
     feed(e, LOUD, 400);
     // well under the entry threshold, above the stay threshold
-    expect(feed(e, 0.03, 1000)).toEqual([]);
+    expect(feed(e, 0.009, 1000)).toEqual([]);
     expect(e.inSpeech).toBe(true);
   });
 

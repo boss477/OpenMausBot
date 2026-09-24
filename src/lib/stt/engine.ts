@@ -74,40 +74,85 @@ function clean(text: string, clipMs: number): string {
 type FrameSink = (pcm: Int16Array, rms: number) => void;
 
 /** The shared, warm microphone. */
-class Microphone {
+export class Microphone {
   private stream: MediaStream | null = null;
   private context: AudioContext | null = null;
   private node: AudioWorkletNode | null = null;
   private sink: FrameSink | null = null;
+  private opening: Promise<void> | null = null;
+  private generation = 0;
 
-  async open(): Promise<void> {
+  open(): Promise<void> {
     if (this.stream && this.context?.state !== "closed") {
-      if (this.context?.state === "suspended") await this.context.resume();
-      return;
+      if (this.context?.state === "suspended") return this.context.resume();
+      return Promise.resolve();
     }
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+    if (this.opening) return this.opening;
+    const opening = this.acquire();
+    this.opening = opening;
+    void opening.then(
+      () => {
+        if (this.opening === opening) this.opening = null;
       },
-    });
+      () => {
+        if (this.opening === opening) this.opening = null;
+      },
+    );
+    return opening;
+  }
+
+  private async acquire(): Promise<void> {
+    const generation = this.generation;
+    let stream: MediaStream | null = null;
+    let context: AudioContext | null = null;
+    let node: AudioWorkletNode | null = null;
+
+    const cleanup = () => {
+      node?.port.close();
+      node?.disconnect();
+      for (const track of stream?.getTracks() ?? []) track.stop();
+      void context?.close().catch(() => {});
+    };
+
     try {
-      const context = new AudioContext({ sampleRate: STT_SAMPLE_RATE, latencyHint: "interactive" });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      if (this.generation !== generation) {
+        cleanup();
+        return;
+      }
+
+      context = new AudioContext({ sampleRate: STT_SAMPLE_RATE, latencyHint: "interactive" });
       await context.audioWorklet.addModule(captureWorkletUrl());
+      if (this.generation !== generation) {
+        cleanup();
+        return;
+      }
+
       const source = context.createMediaStreamSource(stream);
-      const node = new AudioWorkletNode(context, CAPTURE_PROCESSOR, { numberOfInputs: 1, numberOfOutputs: 0 });
+      node = new AudioWorkletNode(context, CAPTURE_PROCESSOR, { numberOfInputs: 1, numberOfOutputs: 0 });
       node.port.onmessage = (event: MessageEvent<{ pcm: Int16Array; rms: number }>) => {
         this.sink?.(event.data.pcm, event.data.rms);
       };
       source.connect(node);
+
       if (context.state === "suspended") await context.resume();
+      if (this.generation !== generation) {
+        cleanup();
+        return;
+      }
+
       this.stream = stream;
       this.context = context;
       this.node = node;
     } catch (error) {
-      for (const track of stream.getTracks()) track.stop();
+      cleanup();
       throw error;
     }
   }
@@ -119,6 +164,8 @@ class Microphone {
   }
 
   close() {
+    this.generation += 1;
+    this.opening = null;
     this.sink = null;
     this.node?.port.close();
     this.node?.disconnect();

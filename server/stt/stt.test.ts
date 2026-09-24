@@ -149,6 +149,37 @@ describe("providers", () => {
     expect(body.indexOf('name="format"')).toBeLessThan(body.indexOf('name="file"'));
   });
 
+  it("preserves supported three-letter language codes like fil for xAI", async () => {
+    const { transcribe, parseUtteranceWav } = await stt();
+    await transcribe({ stt: { provider: "xai", language: "fil" }, xai: { key: "xai-fixture" } }, parseUtteranceWav(wav()));
+    expect(seen[0]?.body).toMatch(/name="language"\r\n\r\nfil\r\n/);
+  });
+
+  it("normalizes locale subtags while preserving language code for xAI", async () => {
+    const { transcribe, parseUtteranceWav } = await stt();
+    await transcribe({ stt: { provider: "xai", language: "fil-PH" }, xai: { key: "xai-fixture" } }, parseUtteranceWav(wav()));
+    expect(seen[0]?.body).toMatch(/name="language"\r\n\r\nfil\r\n/);
+
+    seen.length = 0;
+    await transcribe({ stt: { provider: "xai", language: "en-US" }, xai: { key: "xai-fixture" } }, parseUtteranceWav(wav()));
+    expect(seen[0]?.body).toMatch(/name="language"\r\n\r\nen\r\n/);
+  });
+
+  it("rejects non-loopback HTTP override for xAI STT", async () => {
+    vi.stubEnv("OMB_XAI_STT_API", "http://speech.x.ai/v1");
+    try {
+      const { transcribe, parseUtteranceWav } = await stt();
+      await expect(
+        transcribe({ stt: { provider: "xai" }, xai: { key: "xai-fixture" } }, parseUtteranceWav(wav())),
+      ).rejects.toThrow(/OMB_XAI_STT_API requires HTTPS/);
+    } finally {
+      const address = server.address();
+      if (address && typeof address !== "string") {
+        vi.stubEnv("OMB_XAI_STT_API", `http://127.0.0.1:${address.port}/v1`);
+      }
+    }
+  });
+
   it("never surfaces a provider's error body", async () => {
     status = 401;
     const { transcribe, parseUtteranceWav } = await stt();

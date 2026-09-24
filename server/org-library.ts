@@ -266,6 +266,30 @@ function teamAlive(live: LiveRecords | undefined): boolean {
   return Boolean(live && (Object.keys(live.bots).length || Object.keys(live.rooms).length || Object.keys(live.routines).length));
 }
 
+/** Contract §3.4 `removedLocally`: the parts the person deleted, so the
+ * automatic update (v1.1) can tell them from parts a new release adds and
+ * never brings them back. Before an install's bots, group chats and routines
+ * are replaced by what is left, each key that went is noted once, as
+ * `agent:<key>`, `room:<key>` or `routine:<key>`. A key that exists again
+ * (records restored from a backup) is dropped, so the list never names a
+ * part that is there. Returns whether the list changed. */
+function noteRemovedParts(install: OrgInstall, next: Pick<LiveRecords, "bots" | "rooms" | "routines">): boolean {
+  const removed = new Set(install.removedLocally);
+  const present = new Set<string>();
+  for (const [kind, was, now] of [
+    ["agent", install.bots, next.bots],
+    ["room", install.rooms, next.rooms],
+    ["routine", install.routines, next.routines],
+  ] as const) {
+    for (const key of Object.keys(was)) if (!Object.hasOwn(now, key)) removed.add(`${kind}:${key}`);
+    for (const key of Object.keys(now)) present.add(`${kind}:${key}`);
+  }
+  const after = [...removed].filter((part) => !present.has(part));
+  if (after.length === install.removedLocally.length && after.every((part, index) => part === install.removedLocally[index])) return false;
+  install.removedLocally = after;
+  return true;
+}
+
 // ── the library ─────────────────────────────────────────────────────────
 
 export interface OrgLibraryDeps {
@@ -491,6 +515,9 @@ export class OrgLibrary {
       if (!teamAlive(live)) {
         // A library install creates no records of its own; it stays.
         if (install.kind === "team" && install.status !== "removed") {
+          // Every part is noted too, so the list reads the same whether the
+          // person deleted the team at once or one bot at a time.
+          noteRemovedParts(install, { bots: {}, rooms: {}, routines: {} });
           install.status = "removed";
           install.bots = {};
           install.rooms = {};
@@ -507,7 +534,8 @@ export class OrgLibrary {
         section: mostCommon(live!.sections) ?? install.section,
         status: install.status === "removed" ? "installed" as const : install.status,
       };
-      if (JSON.stringify([install.bots, install.rooms, install.routines, install.section, install.status]) !==
+      const noted = noteRemovedParts(install, next);
+      if (noted || JSON.stringify([install.bots, install.rooms, install.routines, install.section, install.status]) !==
           JSON.stringify([next.bots, next.rooms, next.routines, next.section, next.status])) {
         Object.assign(install, next, { updatedAt: now });
         changed = true;
@@ -536,6 +564,8 @@ export class OrgLibrary {
         section: mostCommon(live.sections) ?? "",
         // What was written at install is not recoverable here; with no base
         // hashes a later update treats these parts as edited and keeps them.
+        // Nor is what the person deleted before state.json was lost, so
+        // removedLocally starts empty (docs/org-library.md, known limit).
         team: { parts: {} },
         bots: live.bots,
         rooms: live.rooms,

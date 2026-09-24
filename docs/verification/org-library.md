@@ -58,6 +58,15 @@ checks the following:
   skill stays there, and Add brings back all three bots. If that release is
   then withdrawn, the leftover skill is switched off once, and the install
   stays `removed`.
+- **Parts the person deleted (`removedLocally`, §3.4).** Deleting one bot,
+  the group chat or one routine notes `agent:<key>`, `room:<key>` or
+  `routine:<key>`, and the team stays `installed`. Deleting a bot notes its
+  routine as well. Two more relays and a direct rebuild add nothing and
+  write nothing new. A restart keeps the list, and a bot deleted while no
+  library was listening is noted on the next start, once, even when the
+  list already names it. A team deleted whole is `removed` with all six
+  parts noted, and Add again starts an empty list. A part that has a record
+  again is taken off the list.
 - **Skills-only package.** It is registered with no records, and its skills
   are offered per bot. Adding one puts it on, stamped. A duplicate is `409`.
   Withdrawing the package switches that skill off.
@@ -207,3 +216,31 @@ Not tested: an actual process kill. The stops are simulated by copying the
 installation's files mid-import. The order in which each bot's starter notes
 and part hashes are written is not covered by a test, because the fixture has
 no stop point that tells them apart.
+
+## 2026-09-24: `removedLocally` is filled (PR #1771)
+
+An integration check of packages wave 2 found `removedLocally` (contract
+§3.2, §3.4, §6) was always `[]`: the rebuild replaced an install's bots,
+group chats and routines with what was left, so the v1.1 update could not
+tell a part the person deleted from one a new release adds. The rebuild now
+notes each key that went (`agent:`, `room:`, `routine:`) before replacing
+them, and a team deleted whole notes all of its parts as well as becoming
+`removed`. Run on macOS (arm64) against disposable fixtures only.
+
+These passed: `pnpm typecheck`, `pnpm lint`, `pnpm i18n:check`, and
+`pnpm exec vitest run` on `server/org-library.test.ts`,
+`server/org-library.e2e.test.ts`, `src/lib/org-library.test.ts`,
+`server/package-import.test.ts` and
+`scripts/testing/verification-docs.test.ts`.
+
+Mutation-checked, with the named tests seen failing:
+
+- the key not noted (all six `removedLocally` tests);
+- a team deleted whole not noting its parts (the whole-team test);
+- a part that exists again kept on the list (the restored-part test);
+- the list not de-duplicated (the restart test).
+
+Not tested: an actual process kill (the restart test disposes the library
+and opens a new one on the same files). Adoption after a lost `state.json`
+starts an empty list by design; see [../org-library.md](../org-library.md).
+Not production qualification.

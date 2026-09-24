@@ -705,6 +705,121 @@ describe("adding from the shelf", () => {
   });
 });
 
+describe("parts the person deleted (removedLocally)", () => {
+  /** The full team added from the shelf: bots lead, scout and writer, the
+   * group chat desk, and the routines daily-digest (scout's) and
+   * weekly-review (lead's). */
+  async function addedTeam() {
+    const app = await installation();
+    const library = app.open();
+    const team = release("full-team.v2.json");
+    app.writeBlob(team.bytes);
+    const body = catalog([entry(TEAM_ID, team)]);
+    library.applyRelay(relay(body));
+    await library.settled();
+    const installId: string = (library.add(TEAM_ID, app.importDeps) as any).value.result.installId;
+    const bot = (key: string) => app.store.bots.find((candidate) => candidate.installedPackage?.agentKey === key)!;
+    const install = () => app.readState().installs[installId];
+    return { app, library, team, body, installId, bot, install };
+  }
+  /** The store-change debounce, then the rebuild it queued. */
+  const afterStoreChange = async (library: { settled(): Promise<void> }) => {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await library.settled();
+  };
+
+  it("notes a deleted bot and keeps the team added", async () => {
+    const { app, library, team, bot, install } = await addedTeam();
+    app.store.deleteBot(bot("writer").id);
+    await afterStoreChange(library);
+    expect(install()).toMatchObject({ status: "installed", removedLocally: ["agent:writer"] });
+    expect(Object.keys(install().bots).sort()).toEqual(["lead", "scout"]);
+    expect(app.posted.at(-1).packages).toEqual([{ packageId: TEAM_ID, release: "1.3.0", sha256: team.sha256, state: "installed" }]);
+    // A bot's routines stop counting with it, so they are noted as well.
+    app.store.deleteBot(bot("scout").id);
+    await afterStoreChange(library);
+    expect(install()).toMatchObject({ status: "installed", removedLocally: ["agent:writer", "agent:scout", "routine:daily-digest"] });
+  });
+
+  it("notes a deleted group chat and a deleted routine", async () => {
+    const { app, library, body, install } = await addedTeam();
+    app.store.deleteGroup(app.store.groups[0]!.id);
+    await afterStoreChange(library);
+    expect(install()).toMatchObject({ status: "installed", removedLocally: ["room:desk"] });
+    expect(install().rooms).toEqual({});
+    // Deleting a routine is not a store change; the next rebuild (here the
+    // next relayed catalog) notes it.
+    app.routines.remove(app.routines.packageStamps().find((routine) => routine.stamp.key === "weekly-review")!.routineId);
+    library.applyRelay(relay(body));
+    await library.settled();
+    expect(install()).toMatchObject({ status: "installed", removedLocally: ["room:desk", "routine:weekly-review"] });
+    expect(Object.keys(install().routines)).toEqual(["daily-digest"]);
+  });
+
+  it("notes each part once, however often the index is rebuilt", async () => {
+    const { app, library, body, bot, install } = await addedTeam();
+    app.store.deleteBot(bot("writer").id);
+    await afterStoreChange(library);
+    const saved = readFileSync(app.statePath, "utf8");
+    for (const libraryVersion of [4, 5]) {
+      library.applyRelay(relay(catalog(body.packages, { libraryVersion })));
+      await library.settled();
+    }
+    expect(library.rebuild()).toBe(false);
+    expect(install().removedLocally).toEqual(["agent:writer"]);
+    expect(JSON.parse(readFileSync(app.statePath, "utf8")).installs).toEqual(JSON.parse(saved).installs);
+  });
+
+  it("keeps the list across a restart, and notes what went while the app was closed", async () => {
+    const { app, library, bot, install, installId } = await addedTeam();
+    app.store.deleteBot(bot("writer").id);
+    await afterStoreChange(library);
+    library.dispose();
+    const before = readFileSync(app.statePath, "utf8");
+    app.open().dispose();
+    // Nothing changed, so nothing was written.
+    expect(readFileSync(app.statePath, "utf8")).toBe(before);
+    expect(install().removedLocally).toEqual(["agent:writer"]);
+
+    // Deleted with no library listening (the app stopped before its
+    // debounced rebuild): the next start notes it. A list that already
+    // names the part (another build wrote it) gets no second entry.
+    const state = app.readState();
+    state.installs[installId].removedLocally.push("agent:scout");
+    writeFileSync(app.statePath, JSON.stringify(state));
+    app.store.deleteBot(bot("scout").id);
+    app.open().dispose();
+    expect(install()).toMatchObject({ status: "installed", removedLocally: ["agent:writer", "agent:scout", "routine:daily-digest"] });
+  });
+
+  it("notes every part of a team deleted at once, and a new Add starts the list again", async () => {
+    const { app, library, install } = await addedTeam();
+    for (const id of app.store.groups.map((group) => group.id)) app.store.deleteGroup(id);
+    for (const id of app.store.bots.map((candidate) => candidate.id)) app.store.deleteBot(id);
+    await afterStoreChange(library);
+    expect(install()).toMatchObject({ status: "removed", bots: {}, rooms: {}, routines: {} });
+    expect([...install().removedLocally].sort()).toEqual([
+      "agent:lead", "agent:scout", "agent:writer", "room:desk", "routine:daily-digest", "routine:weekly-review",
+    ]);
+    expect(library.add(TEAM_ID, app.importDeps)).toMatchObject({ ok: true, status: 201 });
+    expect(install()).toMatchObject({ status: "installed", removedLocally: [] });
+  });
+
+  it("drops a part from the list when it exists again", async () => {
+    const { app, library, body, bot, install } = await addedTeam();
+    const stamp = structuredClone(bot("writer").installedPackage!);
+    app.store.deleteBot(bot("writer").id);
+    await afterStoreChange(library);
+    expect(install().removedLocally).toEqual(["agent:writer"]);
+    // Records restored from a backup, say.
+    const restored = app.store.createBot({ name: "Writer" });
+    app.store.patchBot(restored.id, { installedPackage: stamp });
+    library.applyRelay(relay(body));
+    await library.settled();
+    expect(install()).toMatchObject({ status: "installed", removedLocally: [], bots: { writer: restored.id } });
+  });
+});
+
 describe("with no organization", () => {
   it("shows nothing, reads nothing, writes nothing and reports nothing", async () => {
     const app = await installation();

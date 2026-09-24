@@ -140,10 +140,33 @@ routines is left. An offered skill someone put on another bot is a copy: it
 stays, but it does not keep the team added, so once the team's own records
 are gone the install is `removed` and **Add** brings the whole team back.
 
+Each install's `removedLocally` (contract §3.4) lists the parts of an added
+team the person deleted: `agent:<key>` for a bot, `room:<key>` for a group
+chat and `routine:<key>` for a routine. The automatic update (v1.1) reads it
+to tell a part the person deleted from a part a new release adds, and never
+brings a deleted part back. It is kept like this:
+
+- **When it is noted.** Each time the index is rebuilt, a key the index held
+  that no longer has a record is added to the list once. Rebuilding again,
+  or restarting, adds nothing. A routine stops counting when its bot is
+  deleted, so deleting a bot notes its routines too. Deleting a routine is
+  not a store change, so it is noted at the next rebuild (the next catalog,
+  Add or start).
+- **A team deleted whole** becomes `removed`, and every one of its parts is
+  noted too. The list then reads the same whether the person deleted the
+  team at once or one bot at a time.
+- **A part that has a record again** (records restored from a backup) is
+  taken off the list, so it never names a part that is there.
+- **Add after a removal** brings the whole team back, so it starts a new,
+  empty list.
+
 If the app stops after the records are written but before the index is, the
 records are adopted once the catalog names their package, and a second Add
 is still a no-op. An adopted install has no team-part hashes, so a later
-update treats those parts as edited and keeps them.
+update treats those parts as edited and keeps them. Its `removedLocally`
+starts empty: the remaining records can't show what the person deleted
+before `state.json` was lost, so a later update could bring those parts
+back. The same holds when `state.json` could not be read.
 
 If the app stops in the middle of adding a team, the next start finds its
 entry under `adding` (written before the first record) and looks at what

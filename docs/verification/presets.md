@@ -82,7 +82,8 @@ defaults as a preset** is ticked; then **New bot** lists **From Acme
 Partners**, **Imported presets** and **Built-in roles**, and a bot made from
 the file preset gets its skill off and its notes, one made from the
 organization preset its skill on. Screenshots go to
-`.omb-scratch/verify-evidence/presets-*.png`.
+`.omb-scratch/verify-evidence/presets-*.png`. CI runs it in the advisory
+renderer smoke job next to the Share team recipe.
 
 ## 2026-09-24: what was actually run
 
@@ -92,7 +93,10 @@ headless-renderer run with `OMB_UI_E2E=1`), `server/team-share.e2e.test.ts`,
 `server/team-package-skills.e2e.test.ts`, `server/bot-package.test.ts`,
 `server/index.test.ts`, `server/request-auth.test.ts`,
 `server/new-bot-defaults.test.ts`, `server/new-bot-defaults.e2e.test.ts`,
-`server/bot-setup.e2e.test.ts` and `src/state/bot-creation.test.ts` passed.
+`server/bot-setup.e2e.test.ts`, `src/state/bot-creation.test.ts` and the
+Share team and New bot headless-renderer recipes passed; the presets
+headless recipe passed six runs in a row after its sidebar clicks learned to
+wait for a closing panel.
 Each of these was mutation-checked (broken, the named test seen failing,
 restored): file-preset skills switched on; the defaults preset leaking a
 profile field; a failed import keeping its presets; an organization preset

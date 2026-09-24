@@ -37,7 +37,11 @@ describe("Preset bots in the real renderer", () => {
     }, { timeout: launchTimeout, interval: 250 }).toBe(true);
     const ui = (verb: string, ...args: string[]) => runControlOmb(["ui", verb, "--ui", info.ui, ...args]) as Promise<Record<string, any>>;
     const evaluate = async (js: string) => (await ui("eval", "--js", js)).result;
-    const click = (name: string) => ui("click", "--name", name);
+    const click = (name: string) => ui("click", "--name", name).catch((error: Error) => { throw new Error(`clicking "${name}": ${error.message}`); });
+    // A panel or dialog that just closed can still cover the sidebar for a
+    // frame; agent-browser refuses a covered click without sending it, so
+    // retrying is safe.
+    const clickWhenFree = (name: string) => expect.poll(() => click(name).then(() => true, () => false), { timeout: 10_000 }).toBe(true);
     const snapshot = async () => (await ui("snapshot")).snapshot as string;
     const api = (path: string, method = "GET", body?: unknown) => request(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, info.url);
 
@@ -79,7 +83,7 @@ describe("Preset bots in the real renderer", () => {
     await click("Close settings");
 
     // Templates → Import the file: preset bots for New bot, no team.
-    await click("New or share");
+    await clickWhenFree("New or share");
     await click("Templates");
     await click("Import");
     await evaluate(`(() => { const input = document.querySelector('[role=dialog] input[type=file]'); const transfer = new DataTransfer(); transfer.items.add(new File([window.__presetText], 'sky-1.0.0.openmaus.json', { type: 'application/json' })); input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
@@ -103,7 +107,7 @@ describe("Preset bots in the real renderer", () => {
     writeFileSync(presetsFile, JSON.stringify(stored));
 
     // Share team: the defaults preset goes in only when ticked.
-    await click("New or share");
+    await clickWhenFree("New or share");
     await click("Templates");
     await click("Share");
     await click("Share the General team");
@@ -121,7 +125,7 @@ describe("Preset bots in the real renderer", () => {
     const bots = async () => (await api("/api/bots")).bots as Array<{ id: string; name: string; installedPackage?: Record<string, unknown> }>;
     const create = async (value: string, expected: string, shot: string) => {
       const before = await bots();
-      await click("New or share");
+      await clickWhenFree("New or share");
       await click("New Bot");
       await expect.poll(async () => (await ui("eval", "--js", "[...document.querySelectorAll('[role=dialog] button')].find(button => button.textContent.trim() === 'Create bot')?.disabled")).result, { timeout: 20_000 }).toBe(false);
       await expect.poll(() => evaluate("[...document.querySelectorAll('[role=dialog] select optgroup')].map(group => group.label).join(' | ')"), { timeout: 10_000 })

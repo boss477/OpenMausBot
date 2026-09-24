@@ -295,7 +295,7 @@ import {
   SESSION_SEARCH_SYSTEM_PROMPT,
   workspaceDir,
 } from "./workspace.ts";
-import { readMemoryTopic } from "./workspace.ts";
+import { listMemoryTopics, readMemoryFile, readMemoryTopic, writeMemoryFile, writeMemoryTopic } from "./workspace.ts";
 import {
   MEMORY_INDEX,
   MemoryStoreError,
@@ -405,9 +405,8 @@ import { flushAllProfileHistory, flushProfileHistory, readHistory, recordProfile
 import { fetchBotDirectory, matchDirectoryBots, type MatchedDirectoryBot } from "./bot-directory.ts";
 import { scoutProject, suggestTeam } from "./project-scout.ts";
 import { fetchGithubTeam, fetchLibraryTeam, fetchTeamCatalog } from "./team-library.ts";
-import { BOT_PACKAGE_MAX_SKILLS, isBotPackage, packageAgentAsMember, parseBotPackage, renderBotPackageMarkdown } from "./bot-package.ts";
-import { createTeamManifest, importedMemberProfile, parseTeamManifest } from "./team-manifest.ts";
-import { takeImportName } from "../shared/import-name.ts";
+import { BOT_PACKAGE_MAX_SKILLS, isBotPackage, packageSummary, parsePackageDocument, renderBotPackageMarkdown, type PackageDocument } from "./bot-package.ts";
+import { createTeamManifest, parseTeamManifest } from "./team-manifest.ts";
 import { readThreadEvents } from "./thread-events.ts";
 import { bindThreadLogCapProvider } from "./thread-log-rotation.ts";
 import { listenWebhookIngress, webhookCredential, type WebhookIngress } from "./webhook-ingress.ts";
@@ -417,7 +416,9 @@ import type { WebhookTrigger } from "../shared/webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills, renderSkillInstructions, selectBundledSkills } from "./skill-library.ts";
 import { installedPlaybookInstructions } from "./installed-playbooks.ts";
-import { createBotPackageExport, type ExportablePackageSkill } from "./package-export.ts";
+import { createBotPackageExport, createTeamPackageExport, TeamExportError, type ExportablePackageSkill, type TeamExportSkip } from "./package-export.ts";
+import { importPackageDocument, importTeamManifest, PackageImportError, type PackageImportDeps, type PackageImportResult } from "./package-import.ts";
+import { readPublishedTeam, writePublishedTeam } from "./published-teams.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
 import { shouldMountLocalComputer } from "./local-routing.ts";
@@ -2438,6 +2439,86 @@ function collectExportSkills(
     if (assigned.length) byBot.set(bot.id, assigned);
   }
   return byBot;
+}
+
+/** Skills on one team's bots for a whole-team share. "all" skips a skill
+ * whose stored SKILL.md changed (listed to the person); an explicit list
+ * refuses instead, because the person asked for that exact skill. */
+function collectTeamSkills(
+  bots: readonly BotRecord[],
+  selection: unknown,
+): { ok: true; skillsByBot: Map<string, ExportablePackageSkill[]>; skipped: TeamExportSkip[]; available: string[] } | { ok: false; error: string } {
+  const all = selection === undefined || selection === "all";
+  if (!all && (!Array.isArray(selection) || selection.some((name) => typeof name !== "string" || !isSkillName(name)))) {
+    return { ok: false, error: "skills must be \"all\" or a list of skill names" };
+  }
+  const available = [...new Set(bots.flatMap((bot) => listSkills(bot.id).map((skill) => skill.name)))].sort();
+  const chosen = new Set(all ? available : selection as string[]);
+  const unknown = [...chosen].find((name) => !available.includes(name));
+  if (unknown) return { ok: false, error: `This team has no skill named "${unknown}"` };
+  const skillsByBot = new Map<string, ExportablePackageSkill[]>();
+  const skipped: TeamExportSkip[] = [];
+  for (const bot of bots) {
+    const assigned: ExportablePackageSkill[] = [];
+    for (const listing of listSkills(bot.id)) {
+      if (!chosen.has(listing.name)) continue;
+      const instructions = readSkillFile(bot.id, listing.name);
+      if (instructions === null) {
+        if (!all) return { ok: false, error: `Skill "${listing.name}" changed or is unavailable and cannot be shared safely` };
+        const part = `skills[${listing.name}]`;
+        if (!skipped.some((skip) => skip.part === part)) skipped.push({ part, reason: "skill_changed" });
+        continue;
+      }
+      assigned.push({
+        name: listing.name,
+        description: listing.description,
+        ...(listing.source ? { source: listing.source } : {}),
+        ...(listing.license ? { license: listing.license } : {}),
+        ...(listing.compatibility ? { compatibility: listing.compatibility } : {}),
+        instructions,
+      });
+    }
+    if (assigned.length) skillsByBot.set(bot.id, assigned);
+  }
+  return { ok: true, skillsByBot, skipped, available };
+}
+
+/** A bot's starter notes: MEMORY.md and its topic files. Daily logs never
+ * travel (they are closer to chat history than to notes). */
+function starterNotes(botId: string): Array<{ path: string; text: string }> {
+  const notes: Array<{ path: string; text: string }> = [];
+  const index = readMemoryFile(botId).text;
+  if (index.trim()) notes.push({ path: "MEMORY.md", text: index });
+  for (const topic of listMemoryTopics(botId).sort((a, b) => a.name.localeCompare(b.name))) {
+    const text = readMemoryTopic(botId, topic.name);
+    if (text?.trim()) notes.push({ path: `memory/${topic.name}`, text });
+  }
+  return notes;
+}
+
+/** The importer's view of this installation. Pictures become ordinary local
+ * avatars, connection slots ordinary (switched-off) MCP servers, starter
+ * notes ordinary memory writes. */
+function packageImportDeps(selection: ModelSelection): PackageImportDeps {
+  return {
+    store,
+    routines: routines!,
+    skills: { install: installSkill, setEnabled: setSkillEnabled },
+    memory: { writeIndex: writeMemoryFile, writeTopic: writeMemoryTopic },
+    mcp: { servers: () => cfg.mcpServers ?? {}, refusal: mcpPolicyRefusal, persist: persistMcpServers },
+    sections: { writeBrief: (section, text) => void writeSectionContext(section, text) },
+    images: {
+      save: (bytes, mime) => {
+        const avatarUrl = botAvatarUrlFromStoredPath(saveImage(Buffer.from(bytes), mime).path);
+        if (!avatarUrl) throw new Error("A picture in this package could not be stored");
+        return avatarUrl;
+      },
+    },
+    broadcast: (event) => event.kind === "bot"
+      ? broadcast({ kind: "bot", bot: publicBot(event.bot) })
+      : broadcast({ kind: "group", group: publicGroupState(event.group) }),
+    defaultSelection: () => selection,
+  };
 }
 
 function checkedGroupResponder(value: unknown, memberIds: string[]): GroupDefaultResponder | null {
@@ -15467,8 +15548,60 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 201, { group: { ...publicGroupState(group), messages: [] } });
     }
     if (method === "POST" && path === "/api/teams/export") {
-      const body = await readBody(req);
+      // Pictures the Share dialog prepared ride this body, so it is larger
+      // than the default JSON limit (the document itself is capped at 4 MB).
+      const body = await readBody(req, 8 * 1024 * 1024);
       const profileName = cfg.profile?.name?.trim();
+      if (body.format === "package" && body.version === 2) {
+        // One team, whole, except its chat history (package format v2).
+        if (typeof body.team !== "string") return json(res, 400, { error: "Choose a team to share." });
+        const team = body.team.trim();
+        if (team && !store.sections.includes(team) && !store.bots.some((bot) => sectionKey(bot.section) === team)) {
+          return json(res, 404, { error: "That team no longer exists." });
+        }
+        const optional = (value: unknown) => (typeof value === "string" ? value : undefined);
+        const teamBots = store.bots.filter((bot) => !bot.hidden && sectionKey(bot.section) === team);
+        const skills = collectTeamSkills(teamBots, body.skills);
+        if (!skills.ok) return json(res, 400, { error: skills.error });
+        const avatars = body.avatars && typeof body.avatars === "object" && !Array.isArray(body.avatars)
+          ? body.avatars as Record<string, unknown>
+          : undefined;
+        try {
+          const exported = createTeamPackageExport({
+            team,
+            name: optional(body.name),
+            tagline: optional(body.tagline),
+            summary: optional(body.summary),
+            release: optional(body.release),
+            notes: optional(body.notes),
+            authorName: profileName,
+            bots: store.bots,
+            groups: store.groups,
+            routines: routines!.listRoutines(),
+            brief: readSectionContext(team)?.text,
+            published: readPublishedTeam(team),
+            skillsByBot: skills.skillsByBot,
+            memoryByBot: body.includeMemory === true ? new Map(teamBots.map((bot) => [bot.id, starterNotes(bot.id)])) : undefined,
+            avatars,
+            mcpServers: cfg.mcpServers ?? {},
+            skipped: skills.skipped,
+          });
+          // A preview (the dialog's live counts) never records keys; saving
+          // the file does, so renaming anything later keeps its identity.
+          if (body.dryRun !== true) writePublishedTeam(team, exported.published);
+          return json(res, 200, {
+            document: exported.document,
+            filename: exported.filename,
+            redacted: exported.redacted,
+            skipped: exported.skipped,
+            summary: packageSummary(exported.document),
+            choices: { skills: skills.available },
+          });
+        } catch (error) {
+          if (error instanceof TeamExportError) return json(res, error.status, { error: error.message });
+          throw error;
+        }
+      }
       const name =
         typeof body.name === "string" && body.name.trim()
           ? body.name.trim()
@@ -15632,166 +15765,52 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 400, { error: error instanceof Error ? error.message : "Backup could not be imported" });
         }
       }
-      let packageDocument: ReturnType<typeof parseBotPackage> | null = null;
+      // Every package (v1 JSON, BotMRR Markdown, v2) is read by the one shared
+      // parser as a FILE: it cannot claim a publisher, and its skills and
+      // routines arrive off. A body field such as `trust` is just an unknown
+      // field of the document and is stripped; only the organization library
+      // module ever imports with trust "org".
+      let packageDocument: PackageDocument | null = null;
       let manifest: ReturnType<typeof parseTeamManifest> | null = null;
       try {
-        if (isBotPackage(body)) packageDocument = parseBotPackage(body);
+        if (isBotPackage(body)) packageDocument = parsePackageDocument(body, { trust: "file" });
         else manifest = parseTeamManifest(body);
       } catch (error) {
         return json(res, 400, { error: error instanceof Error ? error.message : "Invalid bot package" });
       }
-      const pkg = packageDocument?.package;
-      const importName = pkg?.name ?? manifest!.team.name;
-      const sourceMembers = pkg
-        ? pkg.agents.map((agent) => ({ member: packageAgentAsMember(agent), playbookKeys: agent.playbooks ?? [], skillNames: agent.skills ?? [] }))
-        : manifest!.team.members.map((member) => ({ member, playbookKeys: [] as string[], skillNames: [] as string[] }));
-
-      const importedBots: ReturnType<typeof store.createBot>[] = [];
-      const createdGroups: GroupRecord[] = [];
-      const createdRoutineIds: string[] = [];
-      // Names already in use, hidden bots included: an archived bot can be
-      // un-archived later, and a revived duplicate would be just as
-      // ambiguous then.
-      const takenNames = new Set(store.bots.map((bot) => bot.name.trim().toLowerCase()));
-      const memberIds = new Map<string, string>();
-      let group: GroupRecord | undefined;
-      let importSection: string | undefined;
+      const deps = packageImportDeps(await defaultSelection());
+      const options = {
+        mode: importMode as "add" | "project",
+        cwd: projectCwd,
+        room: url.searchParams.get("room") ?? undefined,
+        ...(importVisibility ? { visibility: importVisibility } : {}),
+      };
+      let imported: PackageImportResult;
       try {
-        const selection = await defaultSelection();
-        const existingSections = new Set(
-          [...store.sections, ...store.bots.map((bot) => bot.section), ...store.groups.map((candidate) => candidate.section)]
-            .filter((section): section is string => Boolean(section?.trim()))
-            .map((section) => section.trim().toLowerCase()),
-        );
-        // Every template gets its own section, including legacy teams and
-        // project imports. Never merge into an existing section (or replace
-        // its Chief). Keep the name editable through the 60-character API.
-        importSection = takeImportName(importName, existingSections, 60);
-        const playbookByKey = new Map((pkg?.playbooks ?? []).map((playbook) => [playbook.key, playbook]));
-        const packageSkillByName = new Map((pkg?.skills?.entries ?? []).map((skill) => [skill.name, skill]));
-        for (const source of sourceMembers) {
-          const member = source.member;
-          // importedMemberProfile is the authority boundary: persona fields
-          // only, colliding names numbered. seedMessages: false — an
-          // imported bot must not open by greeting the user as though it
-          // were new. composio: false — a shared persona never starts with
-          // reach into the user's connected apps (absence would mean
-          // allowed); the user can switch it on per bot after reading who
-          // they got.
-          const created = store.createBot(
-            {
-              ...importedMemberProfile(member, takenNames),
-              modelSelection: selection,
-              section: importSection,
-              ...(importVisibility ? { visibility: importVisibility } : {}),
-            },
-            { seedMessages: false },
-          );
-          importedBots.push(created);
-          const installedPlaybooks = source.playbookKeys.flatMap((key) => {
-            const playbook = playbookByKey.get(key);
-            return playbook ? [{ ...playbook }] : [];
-          });
-          store.patchBot(created.id, {
-            composio: false,
-            connectorTools: {},
-            ...(installedPlaybooks.length ? { playbooks: installedPlaybooks } : {}),
-            ...(pkg
-              ? {
-                  installedPackage: {
-                    id: pkg.id,
-                    name: pkg.name,
-                    release: pkg.release,
-                    requiredApps: pkg.requirements.apps.map((app) => ({ ...app })),
-                  },
-                }
-              : {}),
-          });
-          for (const skillName of source.skillNames) {
-            const skill = packageSkillByName.get(skillName);
-            if (!skill) throw new Error(`Package skill "${skillName}" is unavailable`);
-            const installed = installSkill(created.id, skill.source ?? `package:${pkg!.id}`, [
-              { path: "SKILL.md", content: skill.instructions },
-            ]);
-            if ("error" in installed) {
-              throw new Error(`Package skill "${skillName}" could not be imported: ${installed.error}`);
-            }
-          }
-          memberIds.set(member.key, created.id);
-        }
-
-        // A package is an explicit structure import: its rooms are created
-        // from package-local keys only, then normalized to fresh bot ids.
-        for (const room of pkg?.rooms ?? []) {
-          const ids = room.members.map((key) => memberIds.get(key)!);
-          let created = store.createGroup(room.name, ids, false, importSection);
-          createdGroups.push(created);
-          const defaultResponder = room.defaultResponder.kind === "agent"
-            ? { kind: "member" as const, botId: memberIds.get(room.defaultResponder.agent)! }
-            : { kind: room.defaultResponder.kind } as const;
-          created = store.patchGroup(created.id, {
-            bulletin: room.bulletin ?? "",
-            defaultResponder,
-            setupCompletedAt: Date.now(),
-          }) ?? created;
-        }
-
-        for (const routine of pkg?.routines ?? []) {
-          const created = routines!.create({
-            name: routine.name,
-            prompt: routine.prompt,
-            botId: memberIds.get(routine.agent)!,
-            runOn: routine.runOn,
-            enabled: false,
-            schedule: routine.schedule,
-            durationMinutes: routine.durationMinutes,
-            ...(routine.timeoutMinutes === undefined ? {} : { timeoutMinutes: routine.timeoutMinutes }),
-            ...(routine.overlap ? { overlap: routine.overlap } : {}),
-          });
-          createdRoutineIds.push(created.id);
-        }
-
-        if (pkg?.chiefOfStaff) {
-          store.setChiefOfStaff(memberIds.get(pkg.chiefOfStaff)!);
-        }
-
-        // The room is created last, so a failure anywhere above leaves no
-        // half-built project behind — the catch below deletes the bots and
-        // there is no room pointing at them.
-        if (!pkg && importMode === "project" && importedBots.length > 0) {
-          const roomName = url.searchParams.get("room")?.trim() || manifest!.team.name;
-          group = store.createGroup(roomName, importedBots.map((bot) => bot.id), false, importSection);
-          createdGroups.push(group);
-          if (projectCwd) {
-            // `cwd` is the folder the room WANTS; the store pins it on the
-            // first turn (pinGroupCwd). Setting the pin here would decide it
-            // before anyone has worked, which is the store's call, not ours.
-            group = store.patchGroup(group.id, { cwd: projectCwd }) ?? group;
-          }
-          broadcast({ kind: "group", group: publicGroupState(group) });
-        }
-
-        const publicBots = importedBots.map((bot) => publicBot(store.bot(bot.id)!));
-        for (const bot of publicBots) broadcast({ kind: "bot", bot });
-
-        return json(res, 201, {
-          name: importName,
-          bots: publicBots,
-          group,
-          groups: createdGroups.map((created) => ({ ...created, messages: [] })),
-          routines: createdRoutineIds.flatMap((id) => routines!.listRoutines().filter((routine) => routine.id === id)),
-        });
+        const result = packageDocument
+          ? importPackageDocument(packageDocument, { ...options, trust: "file" }, deps)
+          : importTeamManifest(manifest!, options, deps);
+        // A file import always gets a fresh install id, so it never reports
+        // "already added"; that answer belongs to the organization library.
+        if (result.alreadyAdded) return json(res, 200, result);
+        imported = result;
       } catch (error) {
-        // A room of deleted members must not survive either — patchGroup can
-        // throw (disk) after createGroup already saved.
-        for (const routineId of createdRoutineIds) routines!.remove(routineId);
-        for (const created of createdGroups) store.deleteGroup(created.id);
-        for (const bot of importedBots) store.deleteBot(bot.id);
-        // Empty teams are now durable too. This import allocated a fresh
-        // identity, so its failed installation must retire that identity.
-        if (importSection && store.sections.includes(importSection)) store.changeEmptySection(importSection, null);
+        if (error instanceof PackageImportError) return json(res, error.status, { error: error.message, code: error.code });
         throw error;
       }
+      return json(res, 201, {
+        name: imported.name,
+        section: imported.section,
+        bots: imported.bots.map((bot) => publicBot(store.bot(bot.id) ?? bot)),
+        group: imported.group,
+        groups: imported.groups.map((created) => ({ ...created, messages: [] })),
+        routines: imported.routines,
+        offeredSkills: imported.offeredSkills,
+        connections: imported.connections,
+        skipped: imported.skipped,
+        brief: imported.brief,
+        notes: imported.notes,
+      });
     }
     m = path.match(/^\/api\/groups\/([\w-]+)\/setup$/);
     if (m && method === "PATCH") {

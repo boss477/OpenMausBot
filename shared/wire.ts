@@ -181,12 +181,29 @@ export interface InstalledPlaybook {
 }
 
 /** Listing provenance and connector intent retained for package details
- * and future re-export. It never means the apps are authorized. */
+ * and future re-export. It never means the apps are authorized. Every field
+ * after requiredApps is additive and optional: older records have none. */
 export interface InstalledPackageMetadata {
   id: string;
   name: string;
   release: string;
   requiredApps: Array<{ slug: string; label: string; reason: string; optional?: boolean }>;
+  /** Where it came from; absent on older records means "file". */
+  source?: "file" | "org";
+  /** file: a random id per import; org: derived from the organization and package. */
+  installId?: string;
+  /** This bot's key in the package, so a re-export keeps its identity. */
+  agentKey?: string;
+  /** Set when the bot was created from a package preset. */
+  presetKey?: string;
+  /** What the package suggested. Never applied: imported bots start on Ask. */
+  suggestedApproval?: "ask" | "auto";
+  /** org only */
+  publisher?: { organizationId: string; slug: string; name: string };
+  /** org only: "<publisher slug>/<package id>" */
+  ref?: string;
+  /** org only: the release bytes that were applied */
+  sha256?: string;
 }
 
 /** One service's connector tool grant: `"*"` widens to every tool on the

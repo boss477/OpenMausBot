@@ -8874,6 +8874,7 @@ orgLibrary = new OrgLibrary({
   store,
   routines: routines!,
   skills: { list: listSkills, stamps: skillPackageStamps, setEnabled: setSkillEnabled, installOrg: installOrgSkill },
+  presets: presetStore,
   // Runtime → Electron main, which posts the report to Admin. Plain Node
   // (no parentPort) keeps it in memory only.
   postState: (message) => utilityParentPort?.postMessage(message),

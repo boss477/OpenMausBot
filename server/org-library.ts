@@ -45,6 +45,7 @@ import {
   type PackageImportResult,
 } from "./package-import.ts";
 import { pair, partHash, sha256Hex, type PartPair, type TeamPart } from "./package-parts.ts";
+import { storedPresetObject, type StoredPreset } from "./presets.ts";
 import type { RoutineManager } from "./routines.ts";
 import type { SkillListing, SkillPackageStamp } from "./skills.ts";
 import { sectionKey, type Store, type StoreChange } from "./store.ts";
@@ -239,6 +240,8 @@ export interface OrgLibraryDeps {
   /** Runtime → Electron main: the report snapshot. Absent in plain Node. */
   postState?: (message: OrgLibraryStateMessage) => void;
   now?: () => number;
+  /** Preset bots (presets.ts): an install's preset rows carry its id. */
+  presets?: { list(): StoredPreset[] };
 }
 
 interface AppliedLibrary {
@@ -435,7 +438,13 @@ export class OrgLibrary {
     return Object.keys(this.state.installs).length > 0 ||
       this.deps.store.bots.some((bot) => bot.installedPackage?.source === "org") ||
       this.deps.store.groups.some((group) => group.installedPackage) ||
-      this.deps.routines.packageStamps().length > 0;
+      this.deps.routines.packageStamps().length > 0 ||
+      this.orgPresetRows().length > 0;
+  }
+
+  /** Preset rows (presets.ts) an organization install registered. */
+  private orgPresetRows(): StoredPreset[] {
+    return (this.deps.presets?.list() ?? []).filter((row) => row.source === "org" && INSTALL_ID.test(row.installId));
   }
 
   /** Reconcile state.json with the records. Returns whether it changed. */
@@ -504,6 +513,48 @@ export class OrgLibrary {
       };
       changed = true;
     }
+    if (this.indexPresets(now)) changed = true;
+    return changed;
+  }
+
+  /** Preset rows never keep a team "installed" (its bots, group chats and
+   * routines do), but they are a skills-and-presets package's only records.
+   * Such an install whose index entry was lost (the app stopped between
+   * presets.json and state.json, or state.json could not be read) is adopted
+   * from them, so Add stays a no-op, its skills stay offered and a
+   * withdrawal still reaches its presets. An adopted install of either kind
+   * gets its presets back in the index. */
+  private indexPresets(now: number): boolean {
+    const byInstall = new Map<string, StoredPreset[]>();
+    for (const row of this.orgPresetRows()) byInstall.set(row.installId, [...(byInstall.get(row.installId) ?? []), row]);
+    let changed = false;
+    for (const [installId, rows] of byInstall) {
+      let install = this.state.installs[installId];
+      if (!install) {
+        const entry = this.library?.catalog.packages.find((candidate) => this.currentInstallId(candidate.packageId) === installId);
+        // A team is adopted from its own records (above), never from presets alone.
+        if (!entry || entry.kind !== "library") continue;
+        const row = rows[0]!;
+        const [slug] = entry.ref.split("/");
+        const adopted = installSchema.safeParse({
+          packageId: entry.packageId,
+          ref: row.ref ?? entry.ref,
+          publisher: row.publisher ?? { organizationId: entry.publisher.organizationId, slug, name: entry.publisher.name },
+          release: row.release,
+          sha256: row.sha256 ?? entry.release?.sha256,
+          status: "installed", kind: "library", name: entry.name, section: "", team: { parts: {} },
+          bots: {}, rooms: {}, routines: {}, connections: {}, presets: {}, removedLocally: [], addedAt: now, updatedAt: now,
+        });
+        if (!adopted.success) continue;
+        install = this.state.installs[installId] = adopted.data;
+        changed = true;
+      }
+      if (Object.keys(install.presets).length) continue;
+      // A row is the preset exactly as the release carried it (§1.6).
+      install.presets = Object.fromEntries(rows.map((row) => [row.key, { presetId: row.id, r: partHash(storedPresetObject(row)) }]));
+      install.updatedAt = now;
+      changed = true;
+    }
     return changed;
   }
 
@@ -529,6 +580,18 @@ export class OrgLibrary {
     for (const bot of this.deps.store.bots) {
       for (const skill of this.deps.skills.stamps(bot.id)) {
         if (skill.stamp.installId !== installId || !skill.enabled) continue;
+        const result = this.deps.skills.setEnabled(bot.id, skill.name, false);
+        if ("error" in result) console.warn(`[org-library] could not switch off ${skill.name}: ${result.error}`);
+      }
+    }
+    // A bot made from one of the install's presets (presets.ts) got the
+    // preset's skills under the release's organization source, unstamped.
+    for (const bot of this.deps.store.bots) {
+      const made = bot.installedPackage;
+      if (made?.source !== "org" || made.installId !== installId || !made.presetKey || !made.ref) continue;
+      const source = `org:${made.ref}@${made.release}`;
+      for (const skill of this.deps.skills.list(bot.id)) {
+        if (skill.source !== source || !skill.enabled) continue;
         const result = this.deps.skills.setEnabled(bot.id, skill.name, false);
         if ("error" in result) console.warn(`[org-library] could not switch off ${skill.name}: ${result.error}`);
       }

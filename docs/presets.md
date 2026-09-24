@@ -43,7 +43,10 @@ the same name. The bot records where it came from (`installedPackage` with
 `presetKey`).
 
 A preset from an organization release that was withdrawn, or from a package
-your organization removed, is no longer offered. Organization presets are
+your organization removed, is no longer offered, and a bot already made from
+a withdrawn one has that release's skills switched off (once; switching them
+back on is yours). Adding the same organization package again, for example a
+team you deleted, refreshes its presets in place rather than adding copies. Organization presets are
 managed in Admin; an imported preset can be removed with **Remove from New
 bot** under the Starting role list (no confirmation step).
 

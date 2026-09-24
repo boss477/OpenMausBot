@@ -218,9 +218,12 @@ export function importPackageDocument(
     if (!deps.skills.installOrg || !deps.routines.stampInstalledPackage) {
       throw new PackageImportError("invalid_package", "This installation cannot add packages from an organization.");
     }
-    if (deps.store.bots.some((bot) => bot.installedPackage?.installId === org.installId) ||
-        deps.store.groups.some((group) => group.installedPackage?.installId === org.installId) ||
-        deps.presets?.hasInstall(org.installId)) {
+    // A bot someone made from one of the install's presets carries its
+    // install id too, but it is theirs, not one of the package's records;
+    // preset rows are not records either. Re-adding a removed team, or
+    // retrying after a crash, re-registers its presets in place (presets.ts).
+    if (deps.store.bots.some((bot) => bot.installedPackage?.installId === org.installId && !bot.installedPackage.presetKey) ||
+        deps.store.groups.some((group) => group.installedPackage?.installId === org.installId)) {
       return { alreadyAdded: true, installId: org.installId };
     }
     // A library package (skills and presets, no team) creates no bots:
@@ -514,7 +517,9 @@ function runImport(source: ImportSource, options: PackageImportOptions, deps: Pa
       });
     }
     let presets: PackageImportResult["presets"];
-    if (source.kind === "package" && pkg?.presets?.length && deps.presets) {
+    // An organization install always registers, so a release re-added without
+    // presets also drops the rows an earlier one left (presets.ts).
+    if (source.kind === "package" && deps.presets && (pkg?.presets?.length || org)) {
       const registered = deps.presets.register(source.document, { source: org ? "org" : "file", installId: installId!, ...(org ? { org } : {}) });
       createdPresets.push(...registered.added.map((preset) => preset.id));
       skipped.push(...registered.skipped);

@@ -182,14 +182,17 @@ it("offers an organization library's presets in New bot until the publisher with
     expect(created.status).toBe(201);
     expect((await call("GET", `/api/bots/${created.body.bot.id}/skills`)).body.skills)
       .toEqual([expect.objectContaining({ name: "objection-handling", enabled: true, source: "org:acme/sales-skills@2.0.1" })]);
-    // Adding it again is a no-op: the preset carries the install.
+    // Adding it again is a no-op: the library's index already has it.
     expect((await call("POST", "/api/org-library/add", { packageId })).body).toEqual({ alreadyAdded: true, installId: added.body.installId });
 
-    // Withdrawn by the publisher: gone from New bot, and the bot made from it stays.
+    // Withdrawn by the publisher: gone from New bot, and the bot made from it
+    // stays with the release's skills switched off (contract §5.7).
     expect((await relay(catalog(true))).status).toBe(200);
     await expect.poll(async () => (await call("GET", "/api/bot-presets")).body.presets, { timeout: 10_000 }).toEqual([]);
     expect((await call("POST", "/api/bots", { name: "Sky 2", useDefaults: false, preset: presetId })).status).toBe(404);
     expect((await call("GET", "/api/bots")).body.bots.some((bot: { id: string }) => bot.id === created.body.bot.id)).toBe(true);
+    expect((await call("GET", `/api/bots/${created.body.bot.id}/skills`)).body.skills)
+      .toEqual([expect.objectContaining({ name: "objection-handling", enabled: false, source: "org:acme/sales-skills@2.0.1" })]);
   } finally {
     await fixture.close();
   }

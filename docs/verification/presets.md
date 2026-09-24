@@ -48,7 +48,7 @@ and added from the shelf answers with its preset, `state.json` records it
 under the install's `presets` with its release hash, New bot offers it under
 Acme Partners with skills on, adding the package again is a no-op, and once
 the catalog lists the release as withdrawn the preset is neither offered
-nor usable while the bot made from it stays.
+nor usable while the bot made from it stays, with its skill switched off.
 
 The printed JSON line names the fixture's data directory and server log.
 
@@ -122,6 +122,24 @@ taking an approval level from a preset; the Share team box ticked by
 default; the New bot picker forgetting the chosen preset; an organization
 library add skipping its presets; `state.json` leaving an install's
 `presets` empty.
+
+## 2026-09-24: review fixes (PR #1773)
+
+`server/org-library.test.ts` now wires the preset store into both the
+importer and the organization library, as `server/index.ts` does, so its
+existing re-add and lost-`state.json` tests run with presets. Added: a
+removed team is added again although a bot was made from its preset (one
+preset row, same id); a presets package whose `state.json` became
+unreadable is adopted from its preset rows (Add stays a no-op, its skills
+stay offered), and its withdrawal hides the preset and switches off the
+skill on the bot made from it but not a same-named skill of the person's
+own; an adopted team gets its `presets` back. `server/presets.test.ts`
+covers an organization install's rows refreshed in place across releases.
+Mutation-checked (each broken, the named test seen failing, restored): a
+preset-made bot blocking re-add; preset rows blocking re-add (the old
+check); no in-place refresh; no preset indexing in the rebuild; withdrawal
+skipping preset-made bots (unit and HTTP); withdrawal matching skills by
+name instead of source.
 
 Not production qualification: no real organization, Admin upload or
 organization library was involved. Organization presets were written into

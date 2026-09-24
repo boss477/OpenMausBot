@@ -170,7 +170,8 @@ export interface PresetInstallContext {
 /** The importer's view of the preset store (package-import.ts). */
 export interface PresetRegistry {
   /** Store the package's presets. `added` are new rows (what a rollback
-   * removes); `existing` are identical file presets already here. */
+   * removes); `existing` are identical file presets already here, or an
+   * organization install's rows refreshed in place. */
   register(document: PackageDocument, context: PresetInstallContext): {
     added: Array<{ id: string; key: string; name: string }>;
     existing: Array<{ id: string; key: string; name: string }>;
@@ -178,8 +179,6 @@ export interface PresetRegistry {
   };
   /** Undo `register` (a failed import leaves no preset behind). */
   remove(ids: readonly string[]): void;
-  /** Whether any preset carries this install id (organization idempotency). */
-  hasInstall(installId: string): boolean;
 }
 
 export interface PresetStore extends PresetRegistry {
@@ -231,22 +230,36 @@ export function createPresetStore(file: string = PRESETS_FILE): PresetStore {
       const row = state.presets.find((candidate) => candidate.id === id);
       return row ? resolveRow(row, state.content[row.installId]) : null;
     },
-    hasInstall: (installId) => load().presets.some((row) => row.installId === installId),
     register(document, context) {
       const pkg = document.package;
+      const presets = pkg.presets ?? [];
       const added: Array<{ id: string; key: string; name: string }> = [];
       const existing: Array<{ id: string; key: string; name: string }> = [];
       const skipped: Array<{ part: string; reason: "too_many_presets" }> = [];
-      if (!pkg.presets?.length) return { added, existing, skipped };
+      const org = context.source === "org" ? context.org : undefined;
+      if (!presets.length && !org) return { added, existing, skipped };
       const state = load();
-      const used = new Set(pkg.presets.flatMap((preset) => preset.skills ?? []));
-      const usedPlaybooks = new Set(pkg.presets.flatMap((preset) => preset.playbooks ?? []));
+      const used = new Set(presets.flatMap((preset) => preset.skills ?? []));
+      const usedPlaybooks = new Set(presets.flatMap((preset) => preset.playbooks ?? []));
       const content: InstallContent = {
         skills: (pkg.skills?.entries ?? []).filter((skill) => used.has(skill.name)),
         playbooks: (pkg.playbooks ?? []).filter((playbook) => usedPlaybooks.has(playbook.key)),
       };
-      const org = context.source === "org" ? context.org : undefined;
-      for (const preset of pkg.presets) {
+      // An organization install owns one set of rows. Adding it again (a
+      // removed team re-added, or an Add retried after the app stopped
+      // before state.json was written) refreshes them in place, keeping
+      // their ids, and drops keys the release no longer has. Nothing is
+      // duplicated, and nothing here decides whether it was added before:
+      // that is org-library.ts's index, rebuilt from the records.
+      const ownRow = (row: StoredPreset) => row.source === "org" && row.installId === context.installId;
+      let refreshed = false;
+      if (org) {
+        const keys = new Set(presets.map((preset) => preset.key));
+        const kept = state.presets.filter((row) => !ownRow(row) || keys.has(row.key));
+        refreshed = kept.length !== state.presets.length;
+        state.presets = kept;
+      }
+      for (const preset of presets) {
         const row: StoredPreset = {
           id: randomUUID(),
           source: context.source,
@@ -264,6 +277,14 @@ export function createPresetStore(file: string = PRESETS_FILE): PresetStore {
           ...(preset.seed ? { seed: structuredClone(preset.seed) } : {}),
           addedAt: Date.now(),
         };
+        const own = org ? state.presets.findIndex((candidate) => ownRow(candidate) && candidate.key === preset.key) : -1;
+        if (own >= 0) {
+          const previous = state.presets[own]!;
+          state.presets[own] = { ...row, id: previous.id, addedAt: previous.addedAt };
+          existing.push({ id: previous.id, key: row.key, name: row.name });
+          refreshed = true;
+          continue;
+        }
         // The same file added twice offers its presets once.
         const same = state.presets.find((candidate) => sameFilePreset(candidate, row, state, content));
         if (same) {
@@ -277,7 +298,7 @@ export function createPresetStore(file: string = PRESETS_FILE): PresetStore {
         state.presets.push(row);
         added.push({ id: row.id, key: row.key, name: row.name });
       }
-      if (added.length) {
+      if (added.length || refreshed) {
         state.content[context.installId] = content;
         save(state);
       }

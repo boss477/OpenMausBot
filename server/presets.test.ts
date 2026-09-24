@@ -126,7 +126,7 @@ describe("preset store", () => {
     expect(app.presetStore.list()).toHaveLength(1);
   });
 
-  it("stores organization presets with their provenance and adds an organization library only once", async () => {
+  it("stores organization presets with their provenance, and refreshes an install's rows in place when it is added again", async () => {
     const app = await installation();
     const org = app.org();
     const document = app.orgDocument("library-only.v2.json");
@@ -136,8 +136,33 @@ describe("preset store", () => {
     expect(app.presetStore.list()).toEqual([expect.objectContaining({
       source: "org", installId: org.installId, publisherName: "Acme Partners", publisher: org.publisher, ref: "acme/sales-skills", sha256: org.sha256,
     })]);
-    expect(app.importer.importPackageDocument(document, { trust: "org", mode: "add", org }, app.deps)).toEqual({ alreadyAdded: true, installId: org.installId });
-    expect(app.presetStore.list()).toHaveLength(1);
+    const [first] = app.presetStore.list();
+    // Preset rows never make the importer answer "already added" (that is
+    // org-library.ts's index): a retry after the app stopped before its index
+    // was written, or a removed team added again, refreshes the same rows.
+    const again = app.importer.importPackageDocument(document, { trust: "org", mode: "add", org }, app.deps);
+    if (again.alreadyAdded) throw new Error("unexpected");
+    expect(again.presets).toEqual([{ id: first!.id, key: "support", name: "Support agent" }]);
+    expect(app.presetStore.list()).toEqual([first]);
+    // A later release of the same install replaces its rows; a key it no
+    // longer has is dropped, and nothing is duplicated.
+    const next = fixture("library-only.v2.json");
+    next.package.release = "2.1.0";
+    next.package.presets[0].name = "Support lead";
+    next.package.presets.push({ ...next.package.presets[0], key: "closer", name: "Closer" });
+    const nextDocument = app.parsePackageDocument(next, { trust: "org" });
+    nextDocument.package.publisher = { organization: "acme", name: "Acme Partners" };
+    app.importer.importPackageDocument(nextDocument, { trust: "org", mode: "add", org: { ...org, sha256: "b".repeat(64) } }, app.deps);
+    expect(app.presetStore.list().map((row) => [row.id === first!.id, row.key, row.name, row.release, row.sha256])).toEqual([
+      [true, "support", "Support lead", "2.1.0", "b".repeat(64)],
+      [false, "closer", "Closer", "2.1.0", "b".repeat(64)],
+    ]);
+    const without = fixture("library-only.v2.json");
+    without.package.presets = without.package.presets.filter((preset: { key: string }) => preset.key === "support");
+    const withoutDocument = app.parsePackageDocument(without, { trust: "org" });
+    withoutDocument.package.publisher = { organization: "acme", name: "Acme Partners" };
+    app.importer.importPackageDocument(withoutDocument, { trust: "org", mode: "add", org }, app.deps);
+    expect(app.presetStore.list().map((row) => [row.id === first!.id, row.key, row.release])).toEqual([[true, "support", "2.0.1"]]);
     // Organization presets are Admin's to remove; a file preset is the person's.
     expect(app.presetStore.removeFilePreset(app.presetStore.list()[0]!.id)).toBe("organization");
     expect(app.presetStore.removeFilePreset("missing")).toBe("not_found");

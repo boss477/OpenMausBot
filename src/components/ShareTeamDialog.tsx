@@ -133,9 +133,10 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
   const [release, setRelease] = useState("");
   const [notes, setNotes] = useState("");
   const [includePictures, setIncludePictures] = useState(true);
-  // Starter notes can hold private facts about the person sharing, so they
-  // go in only when the person ticks the box (the API default is off too).
-  const [includeMemory, setIncludeMemory] = useState(false);
+  // Owner decision: a team is shared whole, everything but chat history, so
+  // starter notes are ticked. The line under the box says they are included
+  // and the person can untick them. (The API default stays off: callers opt in.)
+  const [includeMemory, setIncludeMemory] = useState(true);
   // null = "all": whatever fits, as the server decides; a Set = exactly these.
   const [skillChoice, setSkillChoice] = useState<Set<string> | null>(null);
   const [available, setAvailable] = useState<string[] | null>(null);

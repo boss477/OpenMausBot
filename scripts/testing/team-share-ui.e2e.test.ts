@@ -75,7 +75,7 @@ describe("Share team in the real renderer", () => {
     const saveDisabled = () => evaluate(`[...document.querySelectorAll('[role=dialog] button')].find((button) => button.textContent === "Save file").disabled`);
     await expect.poll(snapshot, { timeout: 20_000 }).toContain("This team is too large to share (4 MB).");
     let dialog = await snapshot();
-    for (const line of ["research-brief", "fill-01", "fill-30", "Starter notes are not included", "Save file"]) expect(dialog).toContain(line);
+    for (const line of ["research-brief", "fill-01", "fill-30", "Starter notes are included", "Save file"]) expect(dialog).toContain(line);
     expect(dialog).not.toContain("What's in the file");
     expect(await saveDisabled()).toBe(true);
     await ui("screenshot", "--out", join(ROOT, ".omb-scratch", "verify-evidence", "share-team-refused.png"));
@@ -85,7 +85,9 @@ describe("Share team in the real renderer", () => {
     dialog = await snapshot();
     for (const line of ["Chief of Staff", "Never included: chat history", "Save file"]) expect(dialog).toContain(line);
     expect(dialog).not.toContain("too large to share");
-    // Starter notes go in only when ticked.
+    // Starter notes are in by default; unticking takes them out, ticking puts them back.
+    await click("Include starter notes (each bot's MEMORY.md and topic notes)");
+    await expect.poll(snapshot, { timeout: 10_000 }).toContain("Starter notes are not included");
     await click("Include starter notes (each bot's MEMORY.md and topic notes)");
     await expect.poll(snapshot, { timeout: 10_000 }).toContain("Starter notes are included");
     // 31 ticked on one bot cannot fit: a sentence, the boxes stay, no Save.

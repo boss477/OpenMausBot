@@ -80,7 +80,7 @@ The second owns a disposable `control-omb ui` app whose Scout has 31 skills,
 17 of them long enough that the file passes 4 MB: Templates → Share →
 **Share the Sales desk team** shows the refusal with every skill box and Save
 disabled; unticking one long skill brings the counts back; starter notes are
-off until ticked; ticking a 31st skill is refused with the per-bot sentence
+in by default and unticking takes them out; ticking a 31st skill is refused with the per-bot sentence
 and unticking another fits again. Then **Save file** (the download is
 captured in the page), and the captured file is imported through the Import
 tab's file input as "Sales desk 2" with skills off. Screenshots go to
@@ -119,7 +119,7 @@ dialog ignoring a refusal's choices or keeping a stale preview (Save
 enabled); ticks ignoring what "all" put in the file; a request sending a
 skill the team no longer has; an address keeping its query values, key-shaped
 path segments or sign-in part; a changed address not reported; addresses not
-listed before Save; and starter notes on by default.
+listed before Save; and starter notes off by default.
 
 Not production qualification: no real hosted MCP server, organization, Admin
 upload or packaged app was involved. The key-shaped segment rule is a

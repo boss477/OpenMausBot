@@ -29,9 +29,9 @@ the team name), or from **Templates → Share**.
   that looks like a key (long, letters and digits mixed, such as a token or
   a server id) replaced with `redacted`. The dialog lists each connection's
   full address before you save, and names any address it changed.
-- **Starter notes.** Each bot's `MEMORY.md` and topic notes, only when you
-  tick **Include starter notes** (they can hold private details about you).
-  Daily logs never go in.
+- **Starter notes.** Each bot's `MEMORY.md` and topic notes. **Include
+  starter notes** is ticked, because a team is shared whole; untick it if the
+  notes hold private details about you. Daily logs never go in.
 - **Connector requirements** (which connected apps the team expects), as
   labels only.
 

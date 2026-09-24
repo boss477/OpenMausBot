@@ -297,7 +297,7 @@ const __APP_VERSION__: string;
       saveFile?(filePath: string): Promise<string | null>;
       /** Save a provider credential through Electron's OS-backed store. */
       setCredential?(
-        name: "composioApiKey" | "xaiApiKey" | "boxToken" | "opencodeGoApiKey" | "ttsKey" | "fishAudioKey" | "jevApiKey" | "openaiImageApiKey" | "customImageApiKey" | "openaiLiveKey",
+        name: "composioApiKey" | "xaiApiKey" | "boxToken" | "opencodeGoApiKey" | "ttsKey" | "fishAudioKey" | "jevApiKey" | "openaiSttKey" | "groqSttKey" | "openaiImageApiKey" | "customImageApiKey" | "openaiLiveKey",
         value: string,
       ): Promise<ConfigStatus>;
       /** In-app auto-update (packaged app only; dormant in dev). onState

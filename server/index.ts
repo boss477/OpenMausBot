@@ -338,6 +338,7 @@ import {
   toWireTask,
 } from "./store.ts";
 import * as tts from "./tts/index.ts";
+import * as stt from "./stt/index.ts";
 import { createDecider, deciderIncludedHere, deciderReady, deciderSavePatch, describeDecider } from "./decider/index.ts";
 import { decideRoomResponder, type RoomRoutingInput } from "./decider/room-routing.ts";
 import { createLiveSession, liveAttachUrl, LiveSessionError, type LiveBot, type LiveHistoryMessage } from "./live-call.ts";
@@ -615,6 +616,7 @@ import { createHostedSlackRoutes } from "./routes/hosted-slack.ts";
 import { createBotPresetRoutes } from "./routes/bot-presets.ts";
 import { createBotMemoryRoutes } from "./routes/bot-memory.ts";
 import { createDeciderRoutes } from "./routes/decider.ts";
+import { createSttRoutes } from "./routes/stt.ts";
 import { createDesktopViewer, desktopViewerUrl } from "./routes/desktop-viewer.ts";
 import { localDesktopTarget, localVmViewerStatus, viewerTargetId } from "./desktop-viewer-targets.ts";
 import { createAntigravityLeftoverRoutes } from "./routes/antigravity-leftovers.ts";
@@ -14927,6 +14929,8 @@ function configStatus() {
     tts: tts.describeVoice(cfg),
     // the decision model: switches and configured-or-not, never the key
     decider: describeDecider(cfg),
+    // provider/model/address are settings; keys come back as booleans only
+    stt: stt.describeStt(cfg),
     imageGen: avatarImageStatus(cfg),
     // Live calls: configured-or-not only; the voice name is a setting
     live: liveSettingsFor(cfg),
@@ -15393,6 +15397,7 @@ ROUTES.push(createBotMemoryRoutes({
   },
 }));
 ROUTES.push(createDeciderRoutes({ decider }));
+ROUTES.push(createSttRoutes({ config: () => cfg }));
 ROUTES.push(createAntigravityLeftoverRoutes({
   hosted: Boolean(hostedModels),
   isAntigravity: (instanceId) => registry.get(instanceId)?.driverKind === "antigravityAgent",
@@ -24184,6 +24189,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (persisted.tts?.key !== undefined) persisted.tts.key = "";
           if (persisted.tts?.fishKey !== undefined) persisted.tts.fishKey = "";
           if (persisted.decider?.key !== undefined) persisted.decider.key = "";
+          if (persisted.stt?.openaiKey !== undefined) persisted.stt.openaiKey = "";
+          if (persisted.stt?.groqKey !== undefined) persisted.stt.groqKey = "";
           if (persisted.imageGen?.key !== undefined) persisted.imageGen.key = "";
           if (persisted.imageGen?.customApiKey !== undefined) persisted.imageGen.customApiKey = "";
           if (persisted.live?.key !== undefined) persisted.live.key = "";

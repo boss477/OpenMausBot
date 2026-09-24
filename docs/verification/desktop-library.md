@@ -17,7 +17,7 @@ pnpm check:electron
 The first command needs no Electron, keychain, network or user data. Each test
 makes its own temporary folder and removes it. Admin is a fake `fetch` (or a
 fake `fetchBytes`) answering with the shapes of contract §5 and Admin's
-`/api/desktop/library*` routes; the runtime is a fake utility process that
+desktop library routes (catalog, release files and report); the runtime is a fake utility process that
 acknowledges every relay at once, as `server/org-library.ts` must. Release
 bytes are the committed `shared/package-fixtures/*.v2.json` files.
 
@@ -49,7 +49,7 @@ It checks:
   signed-out Organization's catalog is never relayed again, and nothing is
   left on disk or in the record.
 - **Old Admin:** with no `capabilities.library`, the fake Admin never sees a
-  `/api/desktop/library*` request, even when the session carries a pointer;
+  desktop library request, even when the session carries a pointer;
   the config is read once. A desktop that could not read the config at start
   asks again after 10 minutes, then fetches.
 - **Runtime restarts:** the catalog is relayed again after `runtimeReady()`;

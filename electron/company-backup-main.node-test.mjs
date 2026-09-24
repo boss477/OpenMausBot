@@ -12,7 +12,8 @@ import { createCompanyBackupSchedule } from "./company-backup-schedule.mjs";
 // importing Electron main (which would start the app). All IO, connection state,
 // and transfer results are synthetic; these tests do not prove archive transport,
 // OS keychain storage, or a renderer workflow.
-const mainSource = readFileSync(new URL("./main.mjs", import.meta.url), "utf8");
+// Windows checkouts can have CRLF line endings; the source checks below match "\n".
+const mainSource = readFileSync(new URL("./main.mjs", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 function section(start, end) {
   const from = mainSource.indexOf(start);
   const to = mainSource.indexOf(end, from + start.length);

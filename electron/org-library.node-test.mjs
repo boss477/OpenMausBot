@@ -34,7 +34,8 @@ const standard = (extra = {}) => catalogOf([
 ], extra);
 const bytesOf = value => Buffer.from(JSON.stringify(value));
 const flush = async () => { for (let index = 0; index < 20; index++) await new Promise(resolve => setImmediate(resolve)); };
-const mode = async file => (await fs.stat(file)).mode & 0o777;
+// Windows has no POSIX file modes (stat reports 0o666); the 0600 checks run on macOS and Linux.
+const mode = async file => process.platform === "win32" ? 0o600 : (await fs.stat(file)).mode & 0o777;
 const exists = file => fs.access(file).then(() => true, () => false);
 
 /** A fake Admin behind fetchBytes, a fake runtime behind relay, and a clock. */

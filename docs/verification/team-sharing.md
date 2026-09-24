@@ -45,18 +45,6 @@ lead's `step-31` (same content) and `z-only`: the dialog's starting ticks
 leave `step-31` out, and unticking `z-only` from them is a `200`, where
 unticking it from everything "all" put in the file is a `400`.
 
-A second test in the same file builds a team whose skills cannot all go in
-one file (a bot with 31 skills, and a name two bots hold with different
-content) and a connection whose address carries a key. It checks that the
-first look (`skills: "all"`) still answers with counts, every skill name and
-the parts left out; that an exact choice over 30 per bot, a conflicting name
-or an unknown name is a `400` sentence that still carries
-`choices.skills` (never a `500`); and that the address goes out as
-`…/s/redacted/mcp`, reported under `redacted`. Finally Scout also gets the
-lead's `step-31` (same content) and `z-only`: the dialog's starting ticks
-leave `step-31` out, and unticking `z-only` from them is a `200`, where
-unticking it from everything "all" put in the file is a `400`.
-
 The printed JSON line names the fixture's data directory and server log.
 
 ## Format, export and import units

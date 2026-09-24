@@ -6,17 +6,21 @@ import { t, tFromServer } from "@/lib/i18n";
 import {
   describePart,
   describeSkip,
-  includedSkills,
+  notesLine,
   preparePictures,
   requestedSkills,
   saveShareFile,
+  SHARE_DIALOG_DEFAULTS,
+  SHARE_VIEW_START,
+  shareAnswered,
+  shareRefused,
   shareRequestBody,
-  skillChoicesFrom,
   tickedSkills,
   type ShareChoices,
   type ShareResponse,
+  type ShareView,
 } from "@/lib/team-share";
-import { api, ApiError, useStore } from "@/state/store";
+import { api, useStore } from "@/state/store";
 import type { NewBotDefaults } from "../../shared/new-bot-defaults";
 
 /** What the file will hold, counted from the server's own dry run, so the
@@ -134,24 +138,22 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
   const [summary, setSummary] = useState("");
   const [release, setRelease] = useState("");
   const [notes, setNotes] = useState("");
-  const [includePictures, setIncludePictures] = useState(true);
-  // Owner decision: a team is shared whole, everything but chat history, so
-  // starter notes are ticked. The line under the box says they are included
-  // and the person can untick them. (The API default stays off: callers opt in.)
-  const [includeMemory, setIncludeMemory] = useState(true);
+  // Pictures and starter notes start ticked (SHARE_DIALOG_DEFAULTS).
+  const [includePictures, setIncludePictures] = useState<boolean>(SHARE_DIALOG_DEFAULTS.includePictures);
+  const [includeMemory, setIncludeMemory] = useState<boolean>(SHARE_DIALOG_DEFAULTS.includeMemory);
   // New bot defaults are personal until shared: off unless ticked.
   const [includePreset, setIncludePreset] = useState(false);
   // The defaults' picture, prepared the first time the box is ticked.
   const [presetPicture, setPresetPicture] = useState<{ dataUrl?: string } | null>(null);
   // null = "all": whatever fits, as the server decides; a Set = exactly these.
   const [skillChoice, setSkillChoice] = useState<Set<string> | null>(null);
-  const [available, setAvailable] = useState<string[] | null>(null);
-  const [included, setIncluded] = useState<string[] | null>(null);
   const [pictures, setPictures] = useState<{ avatars: Record<string, string>; skipped: string[] } | null>(null);
-  const [preview, setPreview] = useState<ShareResponse | null>(null);
+  // The server's answers: counts, skill boxes and refusals (shareAnswered / shareRefused).
+  const [view, setView] = useState<ShareView>(SHARE_VIEW_START);
+  const { preview, available, included, error } = view;
+  const setError = (message: string) => setView((current) => ({ ...current, error: message }));
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<ShareResponse | null>(null);
-  const [error, setError] = useState("");
   const request = useRef(0);
 
   useEffect(() => {
@@ -199,27 +201,19 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
   useEffect(() => {
     if (!pictures) return;
     // No counts (and no Save) until the preset's picture is ready to go in.
-    if (includePreset && !presetPicture) { setPreview(null); return; }
+    if (includePreset && !presetPicture) { setView((current) => ({ ...current, preview: null })); return; }
     const id = ++request.current;
     const all = skillChoice === null;
     const timer = window.setTimeout(() => {
       api<ShareResponse>("/api/teams/export", { method: "POST", body: JSON.stringify(shareRequestBody({ ...choices(true), release: undefined })) })
         .then((result) => {
           if (id !== request.current) return;
-          setPreview(result);
-          setAvailable(result.choices.skills);
-          if (all) setIncluded(includedSkills(result.document));
-          setError("");
+          setView((current) => shareAnswered(current, result, all));
           setRelease((current) => current || result.document.package.release);
         })
         .catch((cause) => {
           if (id !== request.current) return;
-          // This choice cannot be saved: no counts and no Save until it
-          // changes, but the skill boxes stay so it can be changed.
-          setPreview(null);
-          const offered = skillChoicesFrom(cause instanceof ApiError ? cause.body : undefined);
-          if (offered) setAvailable(offered);
-          setError(cause instanceof Error ? cause.message : String(cause));
+          setView((current) => shareRefused(current, cause));
         });
     }, 250);
     return () => window.clearTimeout(timer);
@@ -304,7 +298,7 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
                 <input type="checkbox" className="size-4 accent-accent" checked={includeMemory} onChange={(event) => setIncludeMemory(event.target.checked)} />
                 {t("teamShare.includeNotes")}
               </label>
-              <p className="pl-6 text-[12px] leading-relaxed text-ink-secondary">{includeMemory ? t("teamShare.notesIncluded") : t("teamShare.notesExcluded")}</p>
+              <p className="pl-6 text-[12px] leading-relaxed text-ink-secondary">{notesLine(includeMemory)}</p>
               <ShareSkillChoices available={available ?? []} ticked={ticked} counted={available !== null} onToggle={toggleSkill} />
               <label className="flex items-center gap-2 pt-1">
                 <input type="checkbox" className="size-4 accent-accent" checked={includePreset} onChange={(event) => setIncludePreset(event.target.checked)} />

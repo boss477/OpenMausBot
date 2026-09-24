@@ -4,6 +4,7 @@ import { expect, it } from "vitest";
 
 import { launchVerificationServer } from "../scripts/control-omb.ts";
 import { NEWER_PACKAGE_MESSAGE, parsePackageDocument } from "../shared/package-format.ts";
+import { includedSkills, requestedSkills, startingTicks } from "../src/lib/team-share-skills.ts";
 
 const FIXTURES = join(import.meta.dirname, "..", "shared", "package-fixtures");
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -175,6 +176,19 @@ it("never leaves Share team stuck on skills, and keeps keys out of connection ad
     // Unticking one of the lead's skills is a choice that fits.
     const fits = await ok("POST", "/api/teams/export", { ...body, skills: names.slice(1) });
     expect(fits.document.package.skills.entries).toHaveLength(30);
+
+    // Scout also holds the lead's step-31 (same content) and z-only: "all"
+    // puts step-31 in the file for Scout. The dialog's starting ticks leave
+    // it out, so unticking z-only is still a choice that fits.
+    await addSkill(scout.id, "step-31");
+    await addSkill(scout.id, "z-only");
+    const shared = await ok("POST", "/api/teams/export", body);
+    expect(includedSkills(shared.document)).toContain("step-31");
+    const ticks = startingTicks(shared);
+    expect(ticks).not.toContain("step-31");
+    const untickZ = (from: string[]) => requestedSkills(new Set(from.filter((name) => name !== "z-only")), shared.choices.skills);
+    expect((await call("POST", "/api/teams/export", { ...body, skills: untickZ(includedSkills(shared.document)) })).status).toBe(400);
+    expect((await ok("POST", "/api/teams/export", { ...body, skills: untickZ(ticks) })).document.package.skills.entries).toHaveLength(30);
   } finally {
     await fixture.close();
   }

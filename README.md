@@ -162,6 +162,15 @@ conversations, permissions, memory, or computer access. Browse the
 [open-source playbook repository](https://github.com/milind-soni/openmausbot-teams) or read its
 [portable format](https://github.com/milind-soni/openmausbot-teams/blob/main/FORMAT.md).
 
+### 🤝 Share a whole team
+
+Right-click a team and choose **Share team…** (or use **Templates → Share**) to save the whole team as one
+file: its bots with their instructions, pictures and skills, group chats, routines, shared instructions,
+Chief of Staff, connection slots and, unless you switch them off, each bot's starter notes. The dialog
+shows exactly what the file holds before you save it. Chat history, keys and passwords, model choices and
+computers never go in, and anything that looks like a secret is removed from the text. Whoever imports it
+gets new bots on Ask, skills switched off and routines paused. See [docs/team-sharing.md](docs/team-sharing.md).
+
 ### 🎧 Bots that talk back
 
 Press the speaker on any reply, or switch a bot to read its answers out as they land — so you can listen

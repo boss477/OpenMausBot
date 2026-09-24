@@ -630,6 +630,33 @@ describe("configuration boundaries", () => {
   });
 });
 
+describe("stt.baseUrl validation", () => {
+  it("accepts HTTPS URLs and loopback HTTP URLs", () => {
+    for (const valid of [
+      "https://speech.example.com/v1",
+      "https://localhost:8000/v1",
+      "http://localhost:8000/v1",
+      "http://127.0.0.1:8000/v1",
+      "http://127.0.1.1:8000/v1",
+      "http://[::1]:8000/v1",
+    ]) {
+      expect(parseConfigPatch({ stt: { baseUrl: valid } })).toEqual({ stt: { baseUrl: valid } });
+    }
+  });
+
+  it("rejects non-loopback HTTP URLs and non-HTTP protocols", () => {
+    for (const invalid of [
+      "http://speech.example.com/v1",
+      "http://192.168.1.5:8000/v1",
+      "http://10.0.0.1:8000/v1",
+      "ftp://localhost:8000/v1",
+      "javascript:alert(1)",
+    ]) {
+      expect(() => parseConfigPatch({ stt: { baseUrl: invalid } })).toThrow(/speech server address/i);
+    }
+  });
+});
+
 describe("saving the newer sections", () => {
   it("persists the Anthropic key, the spend limit and the price list, section by section", () => {
     const path = join(DATA_DIR, "config.json");
@@ -1814,6 +1841,33 @@ describe("customMcpServers with url entries", () => {
       docs: { type: "sse", url: "https://docs.example/sse", headers: { Authorization: "Bearer t" } },
       notes: { command: "npx", args: [], env: {} },
     });
+  });
+});
+
+describe("stt.baseUrl validation", () => {
+  it("accepts HTTPS URLs and loopback HTTP URLs", () => {
+    for (const valid of [
+      "https://speech.example.com/v1",
+      "https://localhost:8000/v1",
+      "http://localhost:8000/v1",
+      "http://127.0.0.1:8000/v1",
+      "http://127.0.1.1:8000/v1",
+      "http://[::1]:8000/v1",
+    ]) {
+      expect(parseConfigPatch({ stt: { baseUrl: valid } })).toEqual({ stt: { baseUrl: valid } });
+    }
+  });
+
+  it("rejects non-loopback HTTP URLs and non-HTTP protocols", () => {
+    for (const invalid of [
+      "http://speech.example.com/v1",
+      "http://192.168.1.5:8000/v1",
+      "http://10.0.0.1:8000/v1",
+      "ftp://localhost:8000/v1",
+      "javascript:alert(1)",
+    ]) {
+      expect(() => parseConfigPatch({ stt: { baseUrl: invalid } })).toThrow(/speech server address/i);
+    }
   });
 });
 

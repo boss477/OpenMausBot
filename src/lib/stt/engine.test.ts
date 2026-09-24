@@ -156,3 +156,68 @@ describe("UniversalSpeechEngine", () => {
     expect(mic.closed).toBe(1);
   });
 });
+
+describe("Microphone lifecycle", () => {
+  it("serializes concurrent open() calls and invalidates in-flight acquisitions on close()", async () => {
+    const { Microphone } = await import("./engine");
+    let stopCount = 0;
+    let resolveMedia: (val: unknown) => void;
+    const mediaPromise = new Promise((res) => { resolveMedia = res; });
+
+    const fakeTrack = {
+      stop: vi.fn(() => { stopCount += 1; }),
+      enabled: true,
+    };
+    const fakeStream = {
+      getTracks: () => [fakeTrack],
+      getAudioTracks: () => [fakeTrack],
+    };
+
+    const originalMediaDevices = navigator.mediaDevices;
+    const originalAudioContext = globalThis.AudioContext;
+
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: {
+        getUserMedia: vi.fn(() => mediaPromise),
+      },
+      configurable: true,
+    });
+
+    (globalThis as unknown as { AudioContext: unknown }).AudioContext = class {
+      sampleRate = 16000;
+      state = "running";
+      audioWorklet = {
+        addModule: vi.fn(async () => {}),
+      };
+      createMediaStreamSource() {
+        return { connect: vi.fn() };
+      }
+      close = vi.fn(async () => {});
+    };
+
+    (globalThis as unknown as { AudioWorkletNode: unknown }).AudioWorkletNode = class {
+      port = { onmessage: null, close: vi.fn() };
+      disconnect = vi.fn();
+    };
+
+    try {
+      const mic = new Microphone();
+      const p1 = mic.open();
+      const p2 = mic.open();
+      expect(p1).toBe(p2);
+
+      mic.close();
+
+      resolveMedia!(fakeStream);
+      await p1;
+
+      expect(stopCount).toBe(1);
+    } finally {
+      Object.defineProperty(navigator, "mediaDevices", {
+        value: originalMediaDevices,
+        configurable: true,
+      });
+      (globalThis as unknown as { AudioContext: unknown }).AudioContext = originalAudioContext;
+    }
+  });
+});

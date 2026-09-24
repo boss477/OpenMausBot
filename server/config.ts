@@ -507,7 +507,16 @@ const appConfigSchema = z.object({
     provider: z.enum(["openai", "groq", "xai", "local"]).optional(),
     openaiKey: optionalText,
     groqKey: optionalText,
-    baseUrl: z.string().trim().max(2048).refine((value) => !value || /^https?:\/\//i.test(value), "the speech server address must start with http:// or https://").optional(),
+    baseUrl: z.string().trim().max(2048).refine((value) => {
+      if (!value) return true;
+      try {
+        const parsed = new URL(value);
+        const loopback = parsed.hostname === "localhost" || parsed.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(parsed.hostname);
+        return parsed.protocol === "https:" || (parsed.protocol === "http:" && loopback);
+      } catch {
+        return false;
+      }
+    }, "the speech server address must use HTTPS, or HTTP on loopback (localhost/127.0.0.1)").optional(),
     model: optionalText,
     language: optionalText,
   }).optional(),

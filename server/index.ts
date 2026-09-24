@@ -328,6 +328,7 @@ import {
   applyStagedSkillWrite,
   applySkillWriteWithReceipt,
   getStagedSkillWrite,
+  installOrgSkill,
   installSkill,
   parseSkillMd,
   scanSkillText,
@@ -338,6 +339,7 @@ import {
   rejectStagedSkillWrite,
   removeSkill,
   setSkillEnabled,
+  skillPackageStamps,
   skillsSystemPrompt,
   stageSkillWrite,
 } from "./skills.ts";
@@ -419,6 +421,7 @@ import { installedPlaybookInstructions } from "./installed-playbooks.ts";
 import { createBotPackageExport, createTeamPackageExport, TeamExportError, type ExportablePackageSkill, type TeamExportSkip } from "./package-export.ts";
 import { importPackageDocument, importTeamManifest, PackageImportError, type PackageImportDeps, type PackageImportResult } from "./package-import.ts";
 import { readPublishedTeam, writePublishedTeam } from "./published-teams.ts";
+import { OrgLibrary } from "./org-library.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
 import { shouldMountLocalComputer } from "./local-routing.ts";
@@ -998,7 +1001,7 @@ function adminAuditPlan(method: string, path: string): AuditPlan | null {
   if (path.startsWith("/api/internal/") || path.startsWith("/api/testing/")) return null;
   const plan: AuditPlan = {
     config: requiredScope(method, path, { sharedComputers: sharedComputersEnabled(cfg) }) === "admin",
-    createsBots: method === "POST" && (path === "/api/bots" || path === "/api/teams/import"),
+    createsBots: method === "POST" && (path === "/api/bots" || path === "/api/teams/import" || path === "/api/org-library/add"),
     createsWebhook: method === "POST" && path === "/api/webhooks",
     pairing: method === "POST" && path === "/api/auth/pairing",
   };
@@ -1344,6 +1347,21 @@ utilityParentPort?.on("message", event => {
   const requestId = typeof message.requestId === "string" && message.requestId.length <= 100 ? message.requestId : undefined;
   let ok = true;
   try { managedPolicy.apply(message.policy); } catch { ok = false; }
+  utilityParentPort.postMessage({ type: "openmausbot:managed-desktop-result", requestId, ok });
+});
+// The organization library (server/org-library.ts): Electron relays the
+// verified catalog; the runtime swaps it and acknowledges at once, then
+// reconciles and reports on its own. A relay that arrives before the library
+// exists waits for it (the acknowledgement does not).
+let orgLibrary: OrgLibrary | null = null;
+let pendingOrgLibraryRelay: { library: unknown } | null = null;
+utilityParentPort?.on("message", event => {
+  const message = event.data as { type?: unknown; requestId?: unknown; library?: unknown } | undefined;
+  if (message?.type !== "openmausbot:managed-library") return;
+  const requestId = typeof message.requestId === "string" && message.requestId.length <= 100 ? message.requestId : undefined;
+  let ok = true;
+  if (orgLibrary) ok = orgLibrary.applyRelay(message.library ?? null).ok;
+  else pendingOrgLibraryRelay = { library: message.library ?? null };
   utilityParentPort.postMessage({ type: "openmausbot:managed-desktop-result", requestId, ok });
 });
 // Only Electron owns this port. There is deliberately no HTTP equivalent or
@@ -2507,7 +2525,7 @@ function packageImportDeps(selection: ModelSelection): PackageImportDeps {
   return {
     store,
     routines: routines!,
-    skills: { install: installSkill, setEnabled: setSkillEnabled },
+    skills: { install: installSkill, setEnabled: setSkillEnabled, installOrg: installOrgSkill },
     memory: { writeIndex: writeMemoryFile, writeTopic: writeMemoryTopic },
     mcp: { servers: () => cfg.mcpServers ?? {}, refusal: mcpPolicyRefusal, persist: persistMcpServers },
     sections: { writeBrief: (section, text) => void writeSectionContext(section, text) },
@@ -2615,7 +2633,7 @@ const wireTask = (task: TaskRecord): WireTask => {
 };
 
 const wireBot = (bot: BotRecord): WireBot => {
-  const { resumeCursors: _resumeCursors, tasks, approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, ...rest } = bot;
+  const { resumeCursors: _resumeCursors, tasks, approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, packageBase: _packageBase, ...rest } = bot;
   // An elevated selection is inert until the desktop confirms its exact
   // private reply. Every ordinary client sees the effective Ask state during
   // that two-phase window, never a grant that may still roll back.
@@ -2629,7 +2647,7 @@ const wireBot = (bot: BotRecord): WireBot => {
 /** The correlated private response carries the requested value so Electron
  * can validate it before sending the confirmation that makes it effective. */
 const wireTrustedApprovalBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
-  const { resumeCursors: _resumeCursors, tasks, approvalGrant: _approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, ...rest } = bot;
+  const { resumeCursors: _resumeCursors, tasks, approvalGrant: _approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, packageBase: _packageBase, ...rest } = bot;
   return { ...rest, approvalMode: approvalModeFor(rest), avatarUrl: rest.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
 };
 
@@ -3741,7 +3759,9 @@ const roomHandoffs = new RoomHandoffs(join(DATA_DIR, "room-handoffs.json"), {
 activeCoordinationForThread = threadId => roomHandoffs.activeDirect(threadId);
 const groupUsageReader = new GroupUsageReader(DATA_DIR);
 try { groupUsageReader.refresh(); } catch { /* accounting must not block startup */ }
-function publicGroupState(group: GroupRecord): WireGroup {
+function publicGroupState(record: GroupRecord): WireGroup {
+  // The organization library's part hashes stay server-side.
+  const { installedPackage: _installedPackage, ...group } = record;
   let usage: WireGroup["usage"];
   try { usage = groupUsageReader.forThread(group.threadId); } catch { /* accounting must not block chat */ }
   return { ...group, usage: usage ?? null, working: groupIsWorking(group) || [...roomHandoffs.nodes.values()].some(n => n.groupId === group.id && !["completed", "failed", "cancelled"].includes(n.status)) };
@@ -8753,6 +8773,21 @@ routines = new RoutineManager({
     notify(buildNotification("routine-deferred", notificationBot, routineSourceThread(run) ?? bot.threadId, detail));
   },
 });
+orgLibrary = new OrgLibrary({
+  dataDir: DATA_DIR,
+  store,
+  routines: routines!,
+  skills: { list: listSkills, stamps: skillPackageStamps, setEnabled: setSkillEnabled, installOrg: installOrgSkill },
+  // Runtime → Electron main, which posts the report to Admin. Plain Node
+  // (no parentPort) keeps it in memory only.
+  postState: (message) => utilityParentPort?.postMessage(message),
+});
+{
+  // Set by the port listener above, which TypeScript cannot see run first.
+  const early = pendingOrgLibraryRelay as { library: unknown } | null;
+  if (early) orgLibrary.applyRelay(early.library);
+  pendingOrgLibraryRelay = null;
+}
 // The scheduler receipt and room transcript live in separate durable stores.
 // If the process exited between those two writes, prefer the correlated
 // RoutineRun's terminal truth; an uncorrelated manual goal is simply failed
@@ -12842,6 +12877,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // through a per-process high-entropy test key. The route does not exist
     // unless the launcher explicitly sets that key; production builds never
     // set it.
+    // Isolated fixtures have no Electron parent to relay an organization's
+    // library, so a test relays one here instead. Like the capability route
+    // below, it exists only when the launcher sets its high-entropy key.
+    if (method === "POST" && path === "/api/testing/org-library") {
+      const expected = Buffer.from(process.env.OMB_TEST_ORG_LIBRARY_KEY ?? "");
+      const header = req.headers["x-openmausbot-test-org-library"];
+      const actual = Buffer.from(Array.isArray(header) ? "" : String(header ?? ""));
+      if (expected.length < 32 || actual.length !== expected.length || !timingSafeEqual(actual, expected) || !orgLibrary) {
+        return json(res, 404, { error: "not found" });
+      }
+      const body = await readBody(req);
+      const applied = orgLibrary.applyRelay(body?.library ?? null);
+      await orgLibrary.settled();
+      return json(res, applied.ok ? 200 : 400, { ...applied, report: orgLibrary.lastReport() });
+    }
     if (method === "POST" && path === "/api/testing/internal-capability") {
       const expected = process.env.OMB_TEST_INTERNAL_CAPABILITY_KEY ?? "";
       const actual = Array.isArray(req.headers["x-openmausbot-test-capability"])
@@ -15725,6 +15775,56 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         console.warn("bot directory lookup failed:", error instanceof Error ? error.message : String(error));
       }
       return json(res, 200, { directory });
+    }
+    // ── the organization library (server/org-library.ts) ─────────────────
+    // Admin scope, as import is. With no organization every read answers
+    // {organization: null} and nothing else changes.
+    if (method === "GET" && path === "/api/org-library") {
+      return json(res, 200, orgLibrary?.list() ?? { organization: null, packages: [] });
+    }
+    m = path.match(/^\/api\/org-library\/packages\/([a-f0-9-]{36})$/);
+    if (m && method === "GET") {
+      const outcome = orgLibrary?.preview(m[1]!);
+      if (!outcome) return json(res, 404, { error: "This package is not in your organization's library.", code: "not_listed" });
+      return outcome.ok ? json(res, 200, outcome.value) : json(res, outcome.status, { error: outcome.error, code: outcome.code });
+    }
+    if (method === "POST" && path === "/api/org-library/add") {
+      // One click, no confirmation: the person's click is the decision.
+      const body = await readBody(req);
+      const packageId = typeof body?.packageId === "string" && /^[a-f0-9-]{36}$/.test(body.packageId) ? body.packageId : null;
+      if (!packageId) return json(res, 400, { error: "Choose a package from your organization's library." });
+      if (!orgLibrary) return json(res, 404, { error: "This package is not in your organization's library.", code: "not_listed" });
+      const outcome = orgLibrary.add(packageId, packageImportDeps(await defaultSelection()));
+      if (!outcome.ok) return json(res, outcome.status, { error: outcome.error, code: outcome.code });
+      if (outcome.value.alreadyAdded) return json(res, 200, outcome.value);
+      const imported = outcome.value.result;
+      return json(res, 201, {
+        alreadyAdded: false,
+        installId: imported.installId,
+        name: imported.name,
+        section: imported.section,
+        bots: imported.bots.map((bot) => publicBot(store.bot(bot.id) ?? bot)),
+        groups: imported.groups.map((created) => ({ ...publicGroupState(store.group(created.id) ?? created), messages: [] })),
+        routines: imported.routines,
+        offeredSkills: imported.offeredSkills,
+        connections: imported.connections,
+        skipped: imported.skipped,
+        brief: imported.brief,
+        notes: imported.notes,
+      });
+    }
+    if (method === "GET" && path === "/api/org-library/skills") {
+      const botId = url.searchParams.get("botId") ?? undefined;
+      return json(res, 200, orgLibrary?.offeredSkills(botId) ?? { organization: null, skills: [] });
+    }
+    if (method === "POST" && path === "/api/org-library/skills") {
+      const body = await readBody(req);
+      const parsed = z.object({ botId: z.string().min(1).max(128), installId: z.string().regex(/^[a-f0-9]{32}$/), name: z.string().min(1).max(64) })
+        .safeParse(body);
+      if (!parsed.success) return json(res, 400, { error: "Choose a bot and a skill from your organization's library." });
+      if (!orgLibrary) return json(res, 404, { error: "This package is not in your organization's library.", code: "not_listed" });
+      const outcome = orgLibrary.addOfferedSkill(parsed.data.botId, parsed.data.installId, parsed.data.name);
+      return outcome.ok ? json(res, 201, { skill: outcome.value }) : json(res, outcome.status, { error: outcome.error, code: outcome.code });
     }
     if (method === "POST" && path === "/api/teams/import") {
       // Import is additive-only. A manifest is untrusted input (catalog,

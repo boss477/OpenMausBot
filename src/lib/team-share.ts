@@ -5,6 +5,10 @@
 import { t, tFromServer } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import type { PackageDocument, PackageSummary } from "../../shared/package-format";
+import { skillChoicesFrom, startingTicks } from "./team-share-skills";
+
+// The skill choices are pure and shared with the server's export tests.
+export { includedSkills, requestedSkills, skillChoicesFrom, startingTicks, tickedSkills } from "./team-share-skills";
 
 /** Pictures are downscaled to fit this square before they are shared. */
 export const PICTURE_EDGE = 256;
@@ -43,40 +47,48 @@ export interface ShareResponse {
   choices: { skills: string[] };
 }
 
-// ── skill choices ──────────────────────────────────────────────────────────
-// The first look asks for "all": the server shares the skills that fit and
-// lists the rest. Once the person ticks or unticks one, the request names
-// exactly the ticked skills, and a choice that cannot fit is refused with a
-// sentence. Either way the team's skill names come back, on a refusal too,
-// so the boxes never disappear and a refused choice can always be changed.
+// ── the dialog's state ──────────────────────────────────────────────────────
 
-/** The team's skill names from an export response, or from a refusal's body. */
-export function skillChoicesFrom(value: unknown): string[] | null {
-  const skills = (value as { choices?: { skills?: unknown } } | null | undefined)?.choices?.skills;
-  return Array.isArray(skills) && skills.every((name) => typeof name === "string") ? skills : null;
+/** What the Share dialog starts with. Owner decision: a team is shared whole,
+ * everything but chat history, so pictures and starter notes start ticked and
+ * the line under the notes box says so. (The API default for notes stays
+ * off: callers opt in.) */
+export const SHARE_DIALOG_DEFAULTS = { includePictures: true, includeMemory: true } as const;
+
+/** The line under the starter-notes box. */
+export function notesLine(includeMemory: boolean): string {
+  return includeMemory ? t("teamShare.notesIncluded") : t("teamShare.notesExcluded");
 }
 
-/** The skills a document actually carries. */
-export function includedSkills(document: PackageDocument): string[] {
-  return document.package.skills?.entries.map((entry) => entry.name) ?? [];
+/** What the dialog shows from the server's dry runs. */
+export interface ShareView {
+  /** The dry run of the current choice; null while it is refused (no counts, no Save). */
+  preview: ShareResponse | null;
+  /** Every skill name on the team's bots, one box each; null until the server first answers. */
+  available: string[] | null;
+  /** The boxes ticked until the person changes one (startingTicks). */
+  included: string[] | null;
+  error: string;
 }
 
-/** What to ask for: "all" until the person changes a box, then exactly the
- * ticked skills the team still has (a skill removed meanwhile has no box to
- * untick, so it is never sent). */
-export function requestedSkills(choice: ReadonlySet<string> | null, available: readonly string[] | null): "all" | string[] {
-  if (!choice) return "all";
-  return [...choice].filter((name) => !available || available.includes(name));
+export const SHARE_VIEW_START: ShareView = { preview: null, available: null, included: null, error: "" };
+
+/** A dry run answered. `all`: it asked for "all" (no box changed yet). */
+export function shareAnswered(view: ShareView, result: ShareResponse, all: boolean): ShareView {
+  return { preview: result, available: result.choices.skills, included: all ? startingTicks(result) : view.included, error: "" };
 }
 
-/** Which boxes show ticked: the person's choice, else what "all" put in the
- * file, else (nothing counted yet) every skill. */
-export function tickedSkills(
-  choice: ReadonlySet<string> | null,
-  included: readonly string[] | null,
-  available: readonly string[] | null,
-): Set<string> {
-  return new Set(choice ?? included ?? available ?? []);
+/** A dry run was refused. This choice cannot be saved: no counts and no Save
+ * until it changes. The skill boxes stay, redrawn from the refusal when it
+ * names the team's skills, so the choice can always be changed. */
+export function shareRefused(view: ShareView, cause: unknown): ShareView {
+  const body = cause && typeof cause === "object" && "body" in cause ? (cause as { body?: unknown }).body : undefined;
+  return {
+    ...view,
+    preview: null,
+    available: skillChoicesFrom(body) ?? view.available,
+    error: cause instanceof Error ? cause.message : String(cause),
+  };
 }
 
 /** POST /api/teams/export body (package format v2). */

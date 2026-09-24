@@ -39,7 +39,10 @@ first look (`skills: "all"`) still answers with counts, every skill name and
 the parts left out; that an exact choice over 30 per bot, a conflicting name
 or an unknown name is a `400` sentence that still carries
 `choices.skills` (never a `500`); and that the address goes out as
-`…/s/redacted/mcp`, reported under `redacted`.
+`…/s/redacted/mcp`, reported under `redacted`. Finally Scout also gets the
+lead's `step-31` (same content) and `z-only`: the dialog's starting ticks
+leave `step-31` out, and unticking `z-only` from them is a `200`, where
+unticking it from everything "all" put in the file is a `400`.
 
 The printed JSON line names the fixture's data directory and server log.
 
@@ -58,8 +61,14 @@ pnpm exec vitest run shared/package-format.test.ts server/package-export.test.ts
   redaction, picture and connection skips, key stability across renames,
   what "all" leaves out (30 per bot with switched-on skills first, 60 per
   team, conflicting names), exact choices refused with `TeamExportError`,
-  and connection addresses (sign-in part, fragment, query values and
-  key-shaped path segments removed; plain addresses untouched).
+  the dialog's starting ticks always being a choice that fits (and still
+  fitting with any one box unticked), and connection addresses: one table of
+  keys that must not travel (sign-in part, fragment, query and matrix values,
+  a key in a subdomain, short hex keys, 24 letters or digits in a row, a key
+  after `: @ ! $ ' ( ) * ,` inside a segment, a key as a query or matrix
+  name, a percent-escaped key) and one of plain addresses that must stay
+  byte for byte (`github-mcp-server-2024`, `acme-corp-2025-sales`,
+  `path%20with%20spaces`, localhost).
 - `server/package-import.test.ts` imports into a real store, routine manager,
   skill store and memory in a throwaway home: every part, repeat imports,
   MCP policy refusal, full rollback when the last step fails, the library
@@ -76,6 +85,11 @@ OMB_UI_E2E=1 pnpm exec vitest run scripts/testing/team-share-ui.e2e.test.ts --si
 The first command renders the team menu, the dialog's contents list (with
 each connection's full address), the skill boxes drawn from a refused
 31-skill choice, and the import preview to markup, and checks the saved file.
+`src/lib/team-share.test.ts` also covers the dialog's state as pure
+functions: starter notes and pictures ticked by default with the matching
+line, an answer setting the starting ticks only on the first look, and a
+refusal dropping the counts (so Save is off) while keeping every skill box.
+The second command also runs in CI, in the advisory `ui-smoke` job.
 The second owns a disposable `control-omb ui` app whose Scout has 31 skills,
 17 of them long enough that the file passes 4 MB: Templates → Share →
 **Share the Sales desk team** shows the refusal with every skill box and Save
@@ -125,3 +139,27 @@ Not production qualification: no real hosted MCP server, organization, Admin
 upload or packaged app was involved. The key-shaped segment rule is a
 heuristic (long, letters and digits mixed) and can also replace a harmless
 id; the dialog shows the address it will write.
+
+## 2026-09-24 (second review): what was actually run
+
+On macOS (arm64) against disposable fixtures only: `pnpm typecheck`,
+`pnpm lint`, `pnpm i18n:check`, `server/package-export.test.ts`,
+`server/team-share.e2e.test.ts`, `src/components/ShareTeamDialog.test.ts`,
+`src/lib/team-share.test.ts`, `src/state/store.test.ts`, and the
+headless-renderer run with `OMB_UI_E2E=1` all passed. Each of these was
+mutation-checked (broken, the named test seen failing, restored): host labels
+not tested; whole segments matched instead of runs inside them; the
+words-with-a-year exemption removed; `%XX` not decoded; the 24-in-a-row rule
+removed; matrix and `name=value` values kept; query names not tested; a
+changed address not reported; the team cap ranked by name only; the starting
+ticks keeping a name over a bot's limit; the dialog's answer ignoring the
+starting ticks or overwriting a choice; a refusal dropping its skill names,
+keeping the stale preview or ignoring the error body; starter notes off by
+default or the notes line swapped; and, in the real renderer, the dialog
+starting with notes off and a refusal bypassing the refusal state.
+
+Not production qualification: no real hosted MCP server was involved. The
+address rule is still a heuristic: a harmless id with letters and digits
+mixed (a deployment hash in a subdomain, say) is also replaced, and a key
+made only of words and short numbers would pass. The dialog shows the
+address it will write.

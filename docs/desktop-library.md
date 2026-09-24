@@ -66,6 +66,10 @@ connection generation as company backups: signing out aborts it.
 
 `<data dir>` is `~/.openmausbot` unless `OMB_DATA_DIR` says otherwise.
 
+Workspace and company backups leave out `catalog.json` and `blobs/`, because
+main downloads them again and sign-out deletes them. They keep the runtime's
+`state.json` and `presets.json`.
+
 ## Start, sign-out and restarts
 
 - **At start**, before any request to Admin, main reads `company-library.bin`.
@@ -80,7 +84,8 @@ connection generation as company backups: signing out aborts it.
   release files. Bots, rooms, routines and skills that were added stay.
 - **An Admin that stops advertising the library** is treated the same way.
 - **A restarted runtime** is sent the applied catalog again when it is ready.
-  A runtime that did not acknowledge a catalog gets it on the next sync.
+  A runtime that did not acknowledge a catalog gets it on the next sync. The
+  log says so once per runtime and catalog, not on every sync.
 
 ## Messages with the local runtime
 
@@ -131,5 +136,10 @@ Main waits 5 s after a snapshot arrives and sends only the newest one.
 | OpenMausBot before this channel | as before | ignores the pointer, stays connected |
 | OpenMausBot with it | no library request, no shelf; file import and export work | the shelf |
 | No organization account | as before | — |
+
+This channel and the runtime's handler for `openmausbot:managed-library`
+(`server/org-library.ts`) ship in the same release. A runtime without that
+handler never acknowledges, so main would relay again on every sync and wait
+out the 15 s timeout each time.
 
 How this is tested: [verification/desktop-library.md](verification/desktop-library.md).

@@ -44,13 +44,17 @@ It checks:
 - **Sign-out, revocation and an Admin that drops the library:** the runtime is
   sent `library: null`; `company-library.bin`, `catalog.json` and the cached
   release files go; the runtime's `state.json` and files this channel did not
-  write stay.
+  write stay. A sign-out while the catalog or a release is still downloading,
+  or while the record is being saved, is followed by a runtime restart: the
+  signed-out Organization's catalog is never relayed again, and nothing is
+  left on disk or in the record.
 - **Old Admin:** with no `capabilities.library`, the fake Admin never sees a
   `/api/desktop/library*` request, even when the session carries a pointer;
   the config is read once. A desktop that could not read the config at start
   asks again after 10 minutes, then fetches.
 - **Runtime restarts:** the catalog is relayed again after `runtimeReady()`;
-  an unacknowledged relay is retried on the next sync without a new download.
+  an unacknowledged relay is retried on the next sync without a new download,
+  and logged once per runtime and catalog, not on every sync.
 - **Reports:** 5 s debounce; only the newest snapshot; the first report of a
   start waits for a successful sync; a failed post is retried on the next
   sync, not by time alone; a snapshot for a digest this desktop did not relay,
@@ -61,8 +65,22 @@ It checks:
   refused; the session keeps its own 512 KiB cap.
 - **Pruning:** a release file the catalog stopped naming stays for 7 days.
 
-`pnpm test:electron` also runs `company-backup-main.node-test.mjs`, which
-evaluates the real `ensureManagedDesktop()` wiring in `main.mjs`.
+`pnpm test:electron` also runs `company-backup-main.node-test.mjs`. It
+evaluates the real `ensureManagedDesktop()` from `main.mjs` with a recording
+`createOrgLibrary` and checks what the library is given: `<data
+dir>/org-library`, its own `company-library.bin` record, downloads through the
+client's `fetchLibraryBytes`, the relay to the current local runtime, and the
+client's `library` option. The three calls outside that function
+(`runtimeReady()` when the server is ready, `receive()` in the runtime's
+message handler, `close()` on quit) are checked in the source text only, as
+`server-supervisor.node-test.mjs` does for recovery windows; no test runs them.
+
+Workspace and company backups leave out `org-library/catalog.json` and
+`org-library/blobs/` and keep the runtime's `state.json` and `presets.json`:
+
+```sh
+pnpm exec vitest run server/workspace-backup-policy.test.ts server/workspace-backup.test.ts
+```
 
 ## Mutation checks (2026-09-24)
 
@@ -84,6 +102,20 @@ electron/org-library.node-test.mjs` failed, and the change was reverted:
 | restore not awaited before the first request | at start the saved catalog reaches the runtime … |
 | no relay after a runtime restart | a restarted runtime gets the catalog again … |
 | no pruning | cached release bytes … removed 7 days later |
+| no sign-out checks between the downloads and applying the catalog (the three guards, or only the one before it is applied) | a sign-out during a catalog or release download … |
+| an unacknowledged relay logged on every sync | a restarted runtime gets the catalog again … |
+
+Removing only the check before the record is saved is not caught: the check
+before the catalog is applied still stops it, and the sign-out's own
+`store.write(null)` runs after. It stays as a guard in depth.
+
+In `main.mjs`, each of these was broken and `node --test
+electron/company-backup-main.node-test.mjs` failed: no `runtimeReady()` on
+server ready, no `receive()` of runtime messages, no `close()` on quit, the
+client not given the library, the record sharing `company-connection.bin`, the
+relay sent to another process, and downloads not going through the client. In
+`server/workspace-backup.ts`, a walker without the Organization library rule,
+and a rule that also drops `state.json`, each failed the two backup tests above.
 
 ## Not covered here
 

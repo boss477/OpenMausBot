@@ -159,7 +159,8 @@ export function createOrgLibrary({ dataDir, store, fetchBytes, relay, appVersion
   let closed = false, epoch = 0;
   // `applied` is the verified catalog for `owner` (fetched, or restored from
   // disk); `relayed` is the digest the current runtime acknowledged.
-  let owner = null, applied = null, relayed = null, capable = null, generation, runtimeEpoch = 0;
+  // `relayWarned` names the runtime and catalog a refused relay was last logged for.
+  let owner = null, applied = null, relayed = null, capable = null, generation, runtimeEpoch = 0, relayWarned = null;
   const versions = new Map(), blobRetry = new Map();
   let blobsPausedUntil = 0, catalogRetry = null, prunedAt = 0;
   // Reports: only the newest snapshot is sent, 5 s after it arrives.
@@ -202,7 +203,11 @@ export function createOrgLibrary({ dataDir, store, fetchBytes, relay, appVersion
     while (versions.size > 8) versions.delete(versions.keys().next().value);
     try {
       await relay({ adminOrigin: owner.portalOrigin, organizationId: owner.organizationId, organizationName: catalog.organization.name, digest, catalog: structuredClone(catalog) });
-    } catch { log("organization library: the local runtime did not take the catalog; it will be sent again"); return; }
+    } catch {
+      // Said once per runtime and catalog, not on every sync: a runtime without the handler never acknowledges.
+      if (relayWarned !== `${runtime}:${digest}`) { relayWarned = `${runtime}:${digest}`; log("organization library: the local runtime did not take the catalog; it will be sent again"); }
+      return;
+    }
     if (stamp === epoch && runtime === runtimeEpoch && applied?.digest === digest) relayed = digest;
   }
 

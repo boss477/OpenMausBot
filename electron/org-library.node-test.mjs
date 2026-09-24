@@ -43,9 +43,16 @@ async function fixture(t, { catalog = standard(), relayOk = true } = {}) {
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const dataDir = path.join(home, "org-library");
   const f = {
-    dataDir, clock: Date.now(), relayOk, requests: [], relayed: [], logs: [], timers: [], record: { value: null },
+    dataDir, clock: Date.now(), relayOk, requests: [], relayed: [], logs: [], timers: [], record: { value: null, writes: [] },
     catalogBytes: bytesOf(catalog), blobs: new Map([[sha256Hex(teamBytes), teamBytes], [sha256Hex(skillBytes), skillBytes]]),
-    reports: [], reportFails: false, blobStatus: null,
+    reports: [], reportFails: false, blobStatus: null, hold: null,
+  };
+  /** The next request for `route` (or, for "record", the next save of a catalog record) waits until release(); `reached` resolves once it is in flight. */
+  f.holdNext = route => {
+    let release, arrived;
+    const gate = new Promise(resolve => { release = resolve; }), reached = new Promise(resolve => { arrived = resolve; });
+    f.hold = { route, gate, arrived };
+    return { reached, release };
   };
   f.digest = () => sha256Hex(f.catalogBytes);
   f.setCatalog = value => { f.catalogBytes = bytesOf(value); return f.digest(); };
@@ -53,10 +60,15 @@ async function fixture(t, { catalog = standard(), relayOk = true } = {}) {
     dataDir, appVersion: "0.1.90", log: message => f.logs.push(message), now: () => f.clock,
     setTimer: (callback, delay) => { const timer = { callback, at: f.clock + delay }; f.timers.push(timer); return timer; },
     clearTimer: timer => { f.timers = f.timers.filter(item => item !== timer); },
-    store: { read: async () => f.record.value, write: async value => { f.record.value = value === null ? null : structuredClone(value); } },
+    store: { read: async () => f.record.value, write: async value => {
+      f.record.writes.push(value);
+      if (value !== null && f.hold?.route === "record") { const { gate, arrived } = f.hold; f.hold = null; arrived(); await gate; }
+      f.record.value = value === null ? null : structuredClone(value);
+    } },
     relay: async library => { f.relayed.push(library); if (!f.relayOk) throw new Error("not acknowledged"); },
     fetchBytes: async (route, maxBytes, options) => {
       f.requests.push({ route, maxBytes, options });
+      if (f.hold?.route === route) { const { gate, arrived } = f.hold; f.hold = null; arrived(); await gate; }
       if (route === "/api/desktop/library") return f.catalogBytes;
       if (route === "/api/desktop/library/report") {
         if (f.reportFails) throw Object.assign(new Error("unreachable"), { status: 503 });
@@ -285,6 +297,38 @@ test("sign-out, expiry or revocation hides the shelf and forgets the catalog, it
   assert.equal(f.requests.filter(request => request.route === "/api/desktop/library").length, 1);
 });
 
+test("a sign-out during a catalog or release download, or while its record is saved, leaves nothing the runtime could be sent again", async t => {
+  const newerBytes = Buffer.from('{"format":"a newer release, never parsed by main"}');
+  for (const { name, route, before } of [
+    { name: "the first catalog download", route: "/api/desktop/library" },
+    { name: "a release download for the first catalog", route: `/api/desktop/library/blobs/${sha256Hex(teamBytes)}` },
+    { name: "saving the first catalog's record", route: "record" },
+    { name: "a release download for a newer catalog", route: `/api/desktop/library/blobs/${sha256Hex(newerBytes)}`, before: async f => {
+      await f.sync();
+      f.blobs.set(sha256Hex(newerBytes), newerBytes);
+      return { version: 2, digest: f.setCatalog(catalogOf([entry(TEAM, { release: release(newerBytes, { version: "1.4.0" }) })], { libraryVersion: 2 })) };
+    } },
+  ]) {
+    const f = await fixture(t);
+    const pointer = before ? await before(f) : { version: 1, digest: f.digest() };
+    const held = f.holdNext(route);
+    const syncing = f.library.synchronized({ identity: identity(), capable: true, pointer, generation: 7 });
+    await held.reached;
+    const relayedBefore = f.relayed.length, writesBefore = f.record.writes.length - (route === "record" ? 1 : 0);
+    // Signed out while that download or save is in flight; it completes afterwards, then the runtime restarts.
+    const cleared = f.library.clear();
+    held.release();
+    await Promise.all([syncing, cleared]); await f.library.idle();
+    await f.library.runtimeReady(); await f.library.idle();
+    assert.deepEqual(f.relayed.slice(relayedBefore).filter(library => library !== null), [], `${name}: no catalog reaches the runtime after sign-out`);
+    assert.equal(f.record.writes.at(-1), null, `${name}: the last word on the record is the sign-out's`);
+    if (route !== "record") assert.deepEqual(f.record.writes.slice(writesBefore), [null], `${name}: the record is only cleared, never saved again`);
+    assert.equal(f.record.value, null);
+    assert.equal(await exists(path.join(f.dataDir, "catalog.json")), false, name);
+    assert.deepEqual(await fs.readdir(path.join(f.dataDir, "blobs")).catch(() => []), [], `${name}: no release file stays`);
+  }
+});
+
 test("an Admin that never advertised the library sees no request; one that stops advertising it hides the shelf", async t => {
   const f = await fixture(t);
   await f.library.synchronized({ identity: identity(), capable: false, pointer: null, generation: 1 });
@@ -312,19 +356,28 @@ test("a malformed pointer is ignored: the last catalog stays and nothing is fetc
 
 test("a restarted runtime gets the catalog again; one that did not acknowledge it is retried on the next check", async t => {
   const f = await fixture(t, { relayOk: false });
+  const refusals = () => f.logs.filter(line => line.includes("did not take the catalog")).length;
   await f.sync();
   assert.equal(f.relayed.length, 1);
   f.requests.length = 0;
+  await f.sync();
+  assert.equal(f.relayed.length, 2, "tried again on the next check");
+  assert.equal(refusals(), 1, "logged once for this runtime and catalog, not on every check");
   f.relayOk = true;
   await f.sync();
-  assert.equal(f.relayed.length, 2);
+  assert.equal(f.relayed.length, 3);
   assert.deepEqual(f.fetched("/api/desktop/library"), [], "a relay retry needs no new download");
   await f.sync();
-  assert.equal(f.relayed.length, 2);
+  assert.equal(f.relayed.length, 3);
   await f.library.runtimeReady();
   await f.library.idle();
-  assert.equal(f.relayed.length, 3);
-  assert.equal(f.relayed[2].digest, f.digest());
+  assert.equal(f.relayed.length, 4);
+  assert.equal(f.relayed[3].digest, f.digest());
+  // A restarted runtime that refuses too is logged again, once.
+  f.relayOk = false;
+  await f.library.runtimeReady(); await f.library.idle();
+  await f.sync();
+  assert.equal(refusals(), 2);
 });
 
 test("install reports: 5 s debounce, only the newest snapshot, once per start, and retried on the next check after a failure", async t => {

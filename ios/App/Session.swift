@@ -1116,7 +1116,10 @@ final class Session: ObservableObject {
 
     /// Take back a held message. The row only goes when the computer agrees;
     /// an entry that already drained counts as agreement.
-    func cancelQueued(_ send: QueuedSend, threadId: String, in chat: Chat) async {
+    /// True only when the computer confirmed the held send is gone, so an
+    /// edit never hands back words that already joined a turn.
+    @discardableResult
+    func cancelQueued(_ send: QueuedSend, threadId: String, in chat: Chat) async -> Bool {
         let connectionID = client?.connection.id
         let destination: MessageDestination
         switch chat {
@@ -1131,9 +1134,9 @@ final class Session: ObservableObject {
         // The cancel landed on the computer that owned the row. One selected
         // mid-request has already reset state; its rows are not this cancel's
         // to retire.
-        if agreed, client?.connection.id == connectionID {
-            state.cancelQueued(queueId: send.queueId, threadId: threadId)
-        }
+        guard agreed, client?.connection.id == connectionID else { return false }
+        state.cancelQueued(queueId: send.queueId, threadId: threadId)
+        return true
     }
 
     private func imageSupported(by chat: Chat, capableInstances: Set<String>) -> Bool {

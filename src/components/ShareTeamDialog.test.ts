@@ -8,7 +8,7 @@ vi.mock("./DesktopCapabilities", () => ({
   useDesktopCapabilities: () => ({}),
 }));
 
-import { saveShareFile, skillChoicesFrom, tickedSkills, type ShareResponse } from "@/lib/team-share";
+import { saveShareFile, SHARE_VIEW_START, shareRefused, tickedSkills, type ShareResponse } from "@/lib/team-share";
 import { teamImportPreview } from "@/lib/team-import";
 import { ApiError } from "@/state/store";
 import { ShareSkillChoices, ShareTeamContents } from "./ShareTeamDialog";
@@ -66,9 +66,13 @@ describe("Share team", () => {
     const names = Array.from({ length: 31 }, (_, index) => `step-${String(index + 1).padStart(2, "0")}`);
     const refusal = new ApiError("Morgan has more than 30 skills. Choose fewer skills and try again.", 400,
       { error: "Morgan has more than 30 skills. Choose fewer skills and try again.", choices: { skills: names } });
-    const available = skillChoicesFrom(refusal.body)!;
+    // The dialog's state after that refusal, from the API client's real error.
+    const view = shareRefused({ ...SHARE_VIEW_START, included: names.slice(0, 30) }, refusal);
+    expect(view.preview).toBeNull();
+    expect(view.error).toBe("Morgan has more than 30 skills. Choose fewer skills and try again.");
+    const available = view.available!;
     const markup = renderToStaticMarkup(createElement(ShareSkillChoices, {
-      available, ticked: tickedSkills(null, names.slice(0, 30), available), counted: true, onToggle: vi.fn(),
+      available, ticked: tickedSkills(null, view.included, available), counted: true, onToggle: vi.fn(),
     }));
     expect(markup.match(/type="checkbox"/g)).toHaveLength(31);
     expect(markup.match(/checked=""/g)).toHaveLength(30);

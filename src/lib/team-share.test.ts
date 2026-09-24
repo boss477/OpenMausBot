@@ -1,19 +1,29 @@
 import { describe, expect, it } from "vitest";
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import {
   describePart,
   describeSkip,
   includedSkills,
+  notesLine,
   PICTURE_MAX_BYTES,
   PICTURES_BASE64_BUDGET,
   preparePictures,
   requestedSkills,
+  SHARE_DIALOG_DEFAULTS,
+  SHARE_VIEW_START,
+  shareAnswered,
+  shareRefused,
   shareRequestBody,
   skillChoicesFrom,
+  startingTicks,
   tickedSkills,
   type PictureTools,
+  type ShareResponse,
 } from "./team-share";
-import { parsePackageDocument } from "../../shared/package-format";
+import { packageSummary, parsePackageDocument } from "../../shared/package-format";
 
 const document = parsePackageDocument({
   format: "openmaus.package", version: 2,
@@ -25,6 +35,10 @@ const document = parsePackageDocument({
     connections: [{ key: "crm", label: "CRM", reason: "Accounts.", mcp: { transport: "http", url: "https://example.com/mcp", valueNames: [] } }],
   },
 });
+
+// Lead holds pricing-policy; Scout holds pricing-policy and research-brief.
+const full = parsePackageDocument(JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "shared", "package-fixtures", "full-team.v2.json"), "utf8")));
+const leadOverLimit = { part: "agents[lead].skills[pricing-policy]", reason: "bot_skill_limit" };
 
 describe("share team request", () => {
   it("builds the v2 export body without empty text or empty pictures", () => {
@@ -60,6 +74,50 @@ describe("skill choices", () => {
     expect([...tickedSkills(null, null, names)]).toEqual(names);
     expect([...tickedSkills(new Set(["step-31"]), fits, names)]).toEqual(["step-31"]);
     expect([...tickedSkills(null, null, null)]).toEqual([]);
+  });
+
+  it("starts without a name a bot left out over its limit, even when another bot's copy is in the file", () => {
+    // Lead holds pricing-policy over its 30; Scout's copy is in the file.
+    // Ticked, it would be asked for on both bots and refused.
+    expect(includedSkills(full)).toEqual(["pricing-policy", "research-brief", "objection-handling"]);
+    expect(startingTicks({ document: full, skipped: [
+      leadOverLimit,
+      { part: "skills[research-brief]", reason: "skill_changed" },
+      { part: "agents[lead].appearance.avatar", reason: "picture_too_large" },
+    ] })).toEqual(["research-brief", "objection-handling"]);
+    expect(startingTicks({ document: full, skipped: [] })).toEqual(includedSkills(full));
+  });
+});
+
+describe("the dialog's state", () => {
+  const answer = (skills: string[], extra: Partial<ShareResponse> = {}): ShareResponse => ({
+    document, filename: "desk-1.0.0.openmaus.json", redacted: [], skipped: [], summary: packageSummary(document), choices: { skills }, ...extra,
+  });
+
+  it("starts with pictures and starter notes included, and says so under the notes box", () => {
+    expect(SHARE_DIALOG_DEFAULTS).toEqual({ includePictures: true, includeMemory: true });
+    expect(shareRequestBody({ team: "Desk", skills: "all", includeMemory: SHARE_DIALOG_DEFAULTS.includeMemory })).toMatchObject({ includeMemory: true });
+    expect(notesLine(SHARE_DIALOG_DEFAULTS.includeMemory)).toMatch(/^Starter notes are included/);
+    expect(notesLine(false)).toMatch(/^Starter notes are not included/);
+  });
+
+  it("shows counts from an answer, and sets the starting ticks only from the first look", () => {
+    const first = shareAnswered({ ...SHARE_VIEW_START, error: "old" }, answer(["a", "b"], { document: full, skipped: [leadOverLimit] }), true);
+    expect(first).toMatchObject({ available: ["a", "b"], included: ["research-brief", "objection-handling"], error: "" });
+    expect(first.preview?.filename).toBe("desk-1.0.0.openmaus.json");
+    const chosen = shareAnswered({ ...first, included: ["a"] }, answer(["a", "b", "c"]), false);
+    expect(chosen).toMatchObject({ available: ["a", "b", "c"], included: ["a"] });
+  });
+
+  it("drops the counts on a refusal (no Save) but keeps every skill box", () => {
+    const counted = shareAnswered(SHARE_VIEW_START, answer(["a", "b"]), true);
+    const refusal = Object.assign(new Error("Morgan has more than 30 skills. Choose fewer skills and try again."),
+      { body: { error: "Morgan has more than 30 skills.", choices: { skills: ["a", "b", "c"] } } });
+    expect(shareRefused(counted, refusal)).toEqual({ preview: null, available: ["a", "b", "c"], included: [],
+      error: "Morgan has more than 30 skills. Choose fewer skills and try again." });
+    // A refusal that names no skills (a network error) keeps the boxes already drawn.
+    expect(shareRefused(counted, new Error("offline"))).toEqual({ preview: null, available: ["a", "b"], included: [], error: "offline" });
+    expect(shareRefused(SHARE_VIEW_START, "down")).toEqual({ ...SHARE_VIEW_START, error: "down" });
   });
 });
 

@@ -380,19 +380,56 @@ function sharableAddress(value: string): boolean {
   }
 }
 
-/** A path segment that reads as a key rather than a name: long, token
- * characters only, letters and digits mixed (Zapier's `/s/<token>/`, a
- * server UUID). Deliberately broad; the sharer sees the result before saving. */
-const KEY_SEGMENT = /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9._~+=%-]{20,}$/;
-/** What replaces a key-shaped path segment. */
+/** A run of token characters long enough to be a key. */
+const TOKEN_RUN = /[A-Za-z0-9_-]{16,}/g;
+/** One word of a readable name: letters with at most a short number after
+ * them ("server", "v2", "oauth2"), or a short number alone ("2024"). */
+const NAME_WORD = /^[A-Za-z]*\d{0,4}$/;
+
+/** Whether one piece of an address (a path segment, a host label, a query or
+ * matrix parameter name) holds a key: somewhere in it, a run of 16 or more
+ * token characters that mixes letters and digits, or that has 24 or more
+ * letters or 24 or more digits in a row. A run that reads as words joined by
+ * hyphens or underscores ("github-mcp-server-2024") is a name, not a key.
+ * Percent-escapes are decoded first: "path%20with%20spaces" is words, and an
+ * escaped key is still a key. Deliberately broad; the sharer sees the
+ * address before saving. */
+function keyShaped(piece: string): boolean {
+  let text = piece;
+  try {
+    text = decodeURIComponent(piece);
+  } catch {
+    // A stray "%" is not an escape; test the text as it is.
+  }
+  return (text.match(TOKEN_RUN) ?? []).some((run) => {
+    if (/[A-Za-z]{24,}|\d{24,}/.test(run)) return true;
+    if (!/[A-Za-z]/.test(run) || !/\d/.test(run)) return false;
+    const words = run.split(/[-_]+/).filter(Boolean);
+    return !(words.length > 1 && words.every((word) => NAME_WORD.test(word)));
+  });
+}
+
+/** What replaces a key-shaped part of an address. */
 export const ADDRESS_KEY_PLACEHOLDER = "redacted";
+
+/** One path segment as it may travel. A segment with a key-shaped part is
+ * replaced whole, so no piece of a key split by ":" or ";" is left behind;
+ * otherwise its `;name=value` matrix parameters and `name=value` pieces keep
+ * their names and lose their values, like query parameters. */
+function shareableSegment(segment: string): string {
+  const parts = segment.split(";");
+  if (parts.some((part) => keyShaped(part.split("=")[0]!))) return ADDRESS_KEY_PLACEHOLDER;
+  return parts.map((part) => (part.includes("=") ? `${part.slice(0, part.indexOf("="))}=` : part)).join(";");
+}
 
 /** A connection address as it may travel. Hosted MCP servers often carry
  * their credential in the address itself, where text redaction does not
- * look, so an address loses its sign-in part and fragment, keeps its query
- * names with the values emptied (like header names: the recipient fills
- * them in), and has every key-shaped path segment replaced. An address with
- * none of these is returned exactly as it was. */
+ * look, so an address loses its sign-in part and fragment; keeps its query
+ * and matrix parameter names with the values emptied (like header names: the
+ * recipient fills them in); and has every key-shaped path segment, parameter
+ * name and host label left of the registrable domain (taken as the last two
+ * labels) replaced. An address with none of these is returned exactly as it
+ * was. */
 export function shareableAddress(value: string): { url: string; changed: boolean } {
   let url: URL;
   try {
@@ -410,13 +447,22 @@ export function shareableAddress(value: string): { url: string; changed: boolean
     url.hash = "";
     changed = true;
   }
-  if ([...url.searchParams.values()].some(Boolean)) {
-    url.search = new URLSearchParams([...url.searchParams.keys()].map((name) => [name, ""])).toString();
+  const labels = url.hostname.split(".");
+  const hostLabels = labels.map((label, index) => (index < labels.length - 2 && keyShaped(label) ? ADDRESS_KEY_PLACEHOLDER : label));
+  if (hostLabels.some((label, index) => label !== labels[index])) {
+    url.hostname = hostLabels.join(".");
+    changed = true;
+  }
+  const params = [...url.searchParams];
+  const names = params.map(([name]) => (keyShaped(name) ? ADDRESS_KEY_PLACEHOLDER : name));
+  if (params.some(([name, value], index) => value || names[index] !== name)) {
+    url.search = new URLSearchParams(names.map((name) => [name, ""])).toString();
     changed = true;
   }
   const segments = url.pathname.split("/");
-  if (segments.some((segment) => KEY_SEGMENT.test(segment))) {
-    url.pathname = segments.map((segment) => (KEY_SEGMENT.test(segment) ? ADDRESS_KEY_PLACEHOLDER : segment)).join("/");
+  const shareable = segments.map(shareableSegment);
+  if (shareable.some((segment, index) => segment !== segments[index])) {
+    url.pathname = shareable.join("/");
     changed = true;
   }
   return changed ? { url: url.toString(), changed } : { url: value, changed };

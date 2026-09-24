@@ -6,7 +6,8 @@ you press **Create bot** it also brings the preset's skills, playbooks and
 starter notes. You can change every field before creating the bot.
 
 Presets come from a shared file (a team file or a preset file someone sent
-you) or from your organization's shelf. In New bot's **Starting role** list,
+you) or from your organization's shelf (**Templates → From {Organization}**,
+see [org-library.md](org-library.md)). In New bot's **Starting role** list,
 your organization's presets come first under **From {Organization}**, then
 **Imported presets**, then the built-in roles.
 
@@ -99,5 +100,8 @@ All admin scope.
   `dryRun` as for a team).
 - `POST /api/teams/import` adds a preset file's presets and answers
   `{presets: [{id, key, name}], offeredSkills, bots: [], section: ""}`.
+  `POST /api/org-library/add` answers with the same `presets` list, and the
+  install's entry in `org-library/state.json` records them under `presets`
+  (`{<key>: {presetId, r}}`, `r` the release-side hash of contract §1.6).
 
 See [verification/presets.md](verification/presets.md) for how this is tested.

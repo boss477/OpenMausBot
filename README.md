@@ -170,6 +170,8 @@ Chief of Staff, connection slots and each bot's starter notes (untick them to le
 shows exactly what the file holds before you save it. Chat history, keys and passwords, model choices and
 computers never go in, and anything that looks like a secret is removed from the text. Whoever imports it
 gets new bots on Ask, skills switched off and routines paused. See [docs/team-sharing.md](docs/team-sharing.md).
+Desktops connected to an organization also get **Templates → From {Organization}**: the packages its Admin shares,
+added with one click, skills switched on. See [docs/org-library.md](docs/org-library.md).
 Your New bot defaults can travel too, as a **preset bot** that appears in New bot (in a team file, or on
 their own with **Share as preset…**). See [docs/presets.md](docs/presets.md).
 

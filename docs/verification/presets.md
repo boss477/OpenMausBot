@@ -41,6 +41,15 @@ the standing instructions, then checks:
   refused without creating anything; an imported preset can be removed, an
   organization's cannot (`409`).
 
+A second test in the same file goes through the organization library itself
+(`OMB_TEST_ORG_LIBRARY_KEY` and `POST /api/testing/org-library`, as in
+[org-library.md](org-library.md)): the library fixture relayed in a catalog
+and added from the shelf answers with its preset, `state.json` records it
+under the install's `presets` with its release hash, New bot offers it under
+Acme Partners with skills on, adding the package again is a no-op, and once
+the catalog lists the release as withdrawn the preset is neither offered
+nor usable while the bot made from it stays.
+
 The printed JSON line names the fixture's data directory and server log.
 
 ## Units
@@ -93,8 +102,10 @@ headless-renderer run with `OMB_UI_E2E=1`), `server/team-share.e2e.test.ts`,
 `server/team-package-skills.e2e.test.ts`, `server/bot-package.test.ts`,
 `server/index.test.ts`, `server/request-auth.test.ts`,
 `server/new-bot-defaults.test.ts`, `server/new-bot-defaults.e2e.test.ts`,
-`server/bot-setup.e2e.test.ts`, `src/state/bot-creation.test.ts` and the
-Share team and New bot headless-renderer recipes passed; the presets
+`server/bot-setup.e2e.test.ts`, `src/state/bot-creation.test.ts`,
+`server/org-library.test.ts`, `server/org-library.e2e.test.ts`,
+`src/lib/org-library.test.ts` and the Share team, organization library and
+New bot headless-renderer recipes passed; the presets
 headless recipe passed six runs in a row after its sidebar clicks learned to
 wait for a closing panel.
 Each of these was mutation-checked (broken, the named test seen failing,
@@ -108,7 +119,9 @@ over the preset's; an organization preset removable; the renderer dropping
 the preset id or writing over the preset's notes; the preview refusing a
 preset file; the share request always asking for the preset; the draft
 taking an approval level from a preset; the Share team box ticked by
-default; and the New bot picker forgetting the chosen preset.
+default; the New bot picker forgetting the chosen preset; an organization
+library add skipping its presets; `state.json` leaving an install's
+`presets` empty.
 
 Not production qualification: no real organization, Admin upload or
 organization library was involved. Organization presets were written into

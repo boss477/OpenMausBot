@@ -42,6 +42,7 @@
 //                     driver's prompt idle guard must fail the turn on its own)
 //   FAKE_ACP_MCP_TRANSPORTS  comma list of remote MCP transports the agent
 //                       advertises in initialize (mcpCapabilities), e.g. "http,sse"
+//   FAKE_ACP_PERMISSION_OPTIONS JSON options override in permission mode
 //   FAKE_ACP_DUMP   path to write {argv, env} as JSON, so a test can assert
 //                   argv shape (agent/stdio flags) and env hygiene
 //   FAKE_ACP_LAUNCH_COUNT_FILE  read-increment-write a process counter at
@@ -966,7 +967,7 @@ function handle(msg: any) {
             toolCall: process.env.FAKE_ACP_PERMISSION_TOOL_CALL
               ? JSON.parse(process.env.FAKE_ACP_PERMISSION_TOOL_CALL)
               : { kind: "execute", rawInput: { command: "echo hi" }, title: "echo hi" },
-            options: [
+            options: process.env.FAKE_ACP_PERMISSION_OPTIONS ? JSON.parse(process.env.FAKE_ACP_PERMISSION_OPTIONS) : [
               { optionId: "allow-once", kind: "allow_once" },
               // Grok offers a session-wide allow on some requests and omits
               // it on others; the driver must cope with both.

@@ -3,10 +3,14 @@ import { describe, expect, it } from "vitest";
 import {
   describePart,
   describeSkip,
+  includedSkills,
   PICTURE_MAX_BYTES,
   PICTURES_BASE64_BUDGET,
   preparePictures,
+  requestedSkills,
   shareRequestBody,
+  skillChoicesFrom,
+  tickedSkills,
   type PictureTools,
 } from "./team-share";
 import { parsePackageDocument } from "../../shared/package-format";
@@ -29,6 +33,33 @@ describe("share team request", () => {
         notes: undefined, skills: "all", includeMemory: true, dryRun: true });
     expect(shareRequestBody({ team: "", skills: ["a"], includeMemory: false, avatars: { b1: "data:x" } }))
       .toMatchObject({ team: "", skills: ["a"], includeMemory: false, avatars: { b1: "data:x" } });
+  });
+});
+
+describe("skill choices", () => {
+  const names = Array.from({ length: 31 }, (_, index) => `step-${String(index + 1).padStart(2, "0")}`);
+
+  it("reads the team's skills from an answer and from a refusal alike", () => {
+    expect(skillChoicesFrom({ choices: { skills: names } })).toEqual(names);
+    expect(skillChoicesFrom({ error: "Morgan has more than 30 skills.", choices: { skills: ["a"] } })).toEqual(["a"]);
+    for (const nothing of [undefined, null, {}, { choices: {} }, { choices: { skills: [1] } }, { choices: { skills: "all" } }]) {
+      expect(skillChoicesFrom(nothing)).toBeNull();
+    }
+    expect(includedSkills(document)).toEqual([]);
+  });
+
+  it("asks for all until a box changes, then exactly the ticked skills the team still has", () => {
+    expect(requestedSkills(null, names)).toBe("all");
+    expect(requestedSkills(new Set(["step-01", "gone"]), names)).toEqual(["step-01"]);
+    expect(requestedSkills(new Set(["step-01"]), null)).toEqual(["step-01"]);
+  });
+
+  it("ticks what the file holds first, so changing one box keeps a choice that fits", () => {
+    const fits = names.slice(0, 30);
+    expect([...tickedSkills(null, fits, names)]).toEqual(fits);
+    expect([...tickedSkills(null, null, names)]).toEqual(names);
+    expect([...tickedSkills(new Set(["step-31"]), fits, names)]).toEqual(["step-31"]);
+    expect([...tickedSkills(null, null, null)]).toEqual([]);
   });
 });
 
@@ -80,5 +111,9 @@ describe("part names", () => {
     expect(describePart("package.summary", document)).toBe("summary");
     expect(describeSkip({ part: "connections[local]", reason: "stdio_server" }, document)).toBe("local · connection — runs a command on this computer, so it is not shared");
     expect(describeSkip({ part: "agents[scout].appearance.avatar", reason: "something_new" }, document)).toBe("Scout · picture — something_new");
+    expect(describeSkip({ part: "agents[scout].skills[step-31]", reason: "bot_skill_limit" }, document))
+      .toBe("Scout · skill · step-31 — a bot can share at most 30 skills (switched-on skills go first)");
+    expect(describeSkip({ part: "skills[pricing]", reason: "skill_conflict" }, document)).toBe("pricing · skill — two bots have different skills with this name");
+    expect(describeSkip({ part: "skills[extra]", reason: "team_skill_limit" }, document)).toBe("extra · skill — a team can share at most 60 skills");
   });
 });

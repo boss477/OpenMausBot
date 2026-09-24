@@ -15,7 +15,8 @@ export const PICTURES_BASE64_BUDGET = 2 * 1024 * 1024;
 
 export type ShareSkipReason =
   | "picture_too_large" | "picture_invalid" | "pictures_budget" | "stdio_server" | "insecure_address"
-  | "files_not_shared" | "lead_not_in_group_chat" | "notes_too_large" | "skill_changed";
+  | "files_not_shared" | "lead_not_in_group_chat" | "notes_too_large" | "skill_changed"
+  | "skill_conflict" | "bot_skill_limit" | "team_skill_limit";
 
 export interface ShareSkip { part: string; reason: ShareSkipReason | string }
 
@@ -40,6 +41,42 @@ export interface ShareResponse {
   skipped: ShareSkip[];
   summary: PackageSummary;
   choices: { skills: string[] };
+}
+
+// ── skill choices ──────────────────────────────────────────────────────────
+// The first look asks for "all": the server shares the skills that fit and
+// lists the rest. Once the person ticks or unticks one, the request names
+// exactly the ticked skills, and a choice that cannot fit is refused with a
+// sentence. Either way the team's skill names come back, on a refusal too,
+// so the boxes never disappear and a refused choice can always be changed.
+
+/** The team's skill names from an export response, or from a refusal's body. */
+export function skillChoicesFrom(value: unknown): string[] | null {
+  const skills = (value as { choices?: { skills?: unknown } } | null | undefined)?.choices?.skills;
+  return Array.isArray(skills) && skills.every((name) => typeof name === "string") ? skills : null;
+}
+
+/** The skills a document actually carries. */
+export function includedSkills(document: PackageDocument): string[] {
+  return document.package.skills?.entries.map((entry) => entry.name) ?? [];
+}
+
+/** What to ask for: "all" until the person changes a box, then exactly the
+ * ticked skills the team still has (a skill removed meanwhile has no box to
+ * untick, so it is never sent). */
+export function requestedSkills(choice: ReadonlySet<string> | null, available: readonly string[] | null): "all" | string[] {
+  if (!choice) return "all";
+  return [...choice].filter((name) => !available || available.includes(name));
+}
+
+/** Which boxes show ticked: the person's choice, else what "all" put in the
+ * file, else (nothing counted yet) every skill. */
+export function tickedSkills(
+  choice: ReadonlySet<string> | null,
+  included: readonly string[] | null,
+  available: readonly string[] | null,
+): Set<string> {
+  return new Set(choice ?? included ?? available ?? []);
 }
 
 /** POST /api/teams/export body (package format v2). */
@@ -152,6 +189,7 @@ const FIELD_WORDS: Record<string, LocaleKey> = {
   bulletin: "teamShare.field.bulletin",
   prompt: "teamShare.field.prompt",
   instructions: "teamShare.field.skill",
+  skills: "teamShare.field.skill",
   mcp: "teamShare.field.address",
   appearance: "teamShare.field.picture",
 };
@@ -160,9 +198,9 @@ const FIELD_WORDS: Record<string, LocaleKey> = {
  * stay as their path (still readable, never a value). */
 export function describePart(part: string, document?: PackageDocument): string {
   const pkg = document?.package;
-  const match = /^(agents|rooms|routines|skills|connections|presets|playbooks)\[([^\]]+)\](?:\.([a-zA-Z]+))?/.exec(part);
+  const match = /^(agents|rooms|routines|skills|connections|presets|playbooks)\[([^\]]+)\](?:\.([a-zA-Z]+)(?:\[([^\]]+)\])?)?/.exec(part);
   if (match) {
-    const [, list, key, field] = match;
+    const [, list, key, field, item] = match;
     const named = list === "agents" ? pkg?.agents.find((agent) => agent.key === key)?.name
       : list === "rooms" ? pkg?.rooms?.find((room) => room.key === key)?.name
       : list === "routines" ? pkg?.routines?.find((routine) => routine.key === key)?.name
@@ -172,7 +210,7 @@ export function describePart(part: string, document?: PackageDocument): string {
     const words = field
       ? (FIELD_WORDS[field] ? t(FIELD_WORDS[field]) : field)
       : list === "connections" ? t("teamShare.field.connection") : list === "skills" ? t("teamShare.field.skill") : undefined;
-    const topic = /\.seed\.memory\["([^"]+)"\]/.exec(part)?.[1];
+    const topic = /\.seed\.memory\["([^"]+)"\]/.exec(part)?.[1] ?? item;
     return [who, words, topic].filter(Boolean).join(" · ");
   }
   if (part === "team.brief") return t("teamShare.field.brief");

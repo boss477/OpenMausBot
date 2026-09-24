@@ -8,9 +8,10 @@ vi.mock("./DesktopCapabilities", () => ({
   useDesktopCapabilities: () => ({}),
 }));
 
-import { saveShareFile, type ShareResponse } from "@/lib/team-share";
+import { saveShareFile, skillChoicesFrom, tickedSkills, type ShareResponse } from "@/lib/team-share";
 import { teamImportPreview } from "@/lib/team-import";
-import { ShareTeamContents } from "./ShareTeamDialog";
+import { ApiError } from "@/state/store";
+import { ShareSkillChoices, ShareTeamContents } from "./ShareTeamDialog";
 import { TeamMenuItems } from "./Sidebar";
 import { shareableTeamList, TeamImportDetails } from "./TeamLibraryPanel";
 import { packageSummary, parsePackageDocument } from "../../shared/package-format";
@@ -54,8 +55,27 @@ describe("Share team", () => {
       "Quill · picture — picture is larger than 64 KB",
       "local-tool · connection — runs a command on this computer, so it is not shared",
       "Daily digest · attachments — attached files are not shared",
+      "Connection addresses in the file CRM · https://mcp.example.com/crm",
     ]) expect(words).toContain(line);
     expect(text(renderToStaticMarkup(createElement(ShareTeamContents, { preview, includeMemory: false, localSkips: [] })))).toContain("Starter notes None");
+  });
+
+  it("keeps every skill box when a 31-skill bot's exact choice is refused", () => {
+    // The refusal the server sends for a bot with 31 ticked skills: the
+    // sentence, and the team's skill names so the boxes stay drawn.
+    const names = Array.from({ length: 31 }, (_, index) => `step-${String(index + 1).padStart(2, "0")}`);
+    const refusal = new ApiError("Morgan has more than 30 skills. Choose fewer skills and try again.", 400,
+      { error: "Morgan has more than 30 skills. Choose fewer skills and try again.", choices: { skills: names } });
+    const available = skillChoicesFrom(refusal.body)!;
+    const markup = renderToStaticMarkup(createElement(ShareSkillChoices, {
+      available, ticked: tickedSkills(null, names.slice(0, 30), available), counted: true, onToggle: vi.fn(),
+    }));
+    expect(markup.match(/type="checkbox"/g)).toHaveLength(31);
+    expect(markup.match(/checked=""/g)).toHaveLength(30);
+    expect(markup).toMatch(/<input type="checkbox"[^>]*\/>step-31/);
+    expect(markup).not.toMatch(/checked=""[^>]*\/>step-31/);
+    expect(text(renderToStaticMarkup(createElement(ShareSkillChoices, { available: [], ticked: new Set<string>(), counted: true, onToggle: vi.fn() }))))
+      .toContain("This team's bots have no skills.");
   });
 
   it("saves the document as the file other apps and Admin read", async () => {

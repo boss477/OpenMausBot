@@ -6,13 +6,17 @@ import { t, tFromServer } from "@/lib/i18n";
 import {
   describePart,
   describeSkip,
+  includedSkills,
   preparePictures,
+  requestedSkills,
   saveShareFile,
   shareRequestBody,
+  skillChoicesFrom,
+  tickedSkills,
   type ShareChoices,
   type ShareResponse,
 } from "@/lib/team-share";
-import { api, useStore } from "@/state/store";
+import { api, ApiError, useStore } from "@/state/store";
 
 /** What the file will hold, counted from the server's own dry run, so the
  * numbers are exactly what Save file writes. Pure, for tests. */
@@ -51,6 +55,18 @@ export function ShareTeamContents({ preview, includeMemory, localSkips }: {
           </div>
         ))}
       </dl>
+      {pkg.connections?.length ? (
+        // The whole address, before Save: hosted servers often carry a key
+        // in it, and this is where the person can see what goes out.
+        <div className="mt-3 text-[12.5px] text-ink-secondary">
+          <div className="font-medium text-ink">{t("teamShare.addresses")}</div>
+          <ul className="mt-1 space-y-0.5">
+            {pkg.connections.map((connection) => (
+              <li key={connection.key} className="break-all"><span className="text-ink">{connection.label}</span> · {connection.mcp.url}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
       <p className="mt-3 flex items-start gap-2 text-[12.5px] leading-relaxed text-ink-secondary">
         <ShieldCheck size={15} className="mt-0.5 shrink-0 text-success" />
         <span>{t("teamShare.never")}</span>
@@ -75,6 +91,32 @@ export function ShareTeamContents({ preview, includeMemory, localSkips }: {
   );
 }
 
+/** The skill boxes. They are drawn from the team's skill names, which come
+ * back on a refused export too, so they never vanish behind an error. Pure,
+ * for tests. */
+export function ShareSkillChoices({ available, ticked, counted, onToggle }: {
+  available: readonly string[];
+  ticked: ReadonlySet<string>;
+  /** The server has answered at least once. */
+  counted: boolean;
+  onToggle: (skill: string) => void;
+}) {
+  return (
+    <div>
+      <div className="font-medium">{t("teamShare.includeSkills")}</div>
+      {counted && available.length === 0 && <p className="mt-1 text-[12px] text-ink-secondary">{t("teamShare.noSkills")}</p>}
+      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+        {available.map((skill) => (
+          <label key={skill} className="flex items-center gap-1.5 text-[12.5px]">
+            <input type="checkbox" className="size-3.5 accent-accent" checked={ticked.has(skill)} onChange={() => onToggle(skill)} />
+            {skill}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** Share team…: choose what goes in, see exactly what that is, save the
  * file. No confirm step; the person's click on Save file is the decision. */
 export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () => void }) {
@@ -91,10 +133,13 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
   const [release, setRelease] = useState("");
   const [notes, setNotes] = useState("");
   const [includePictures, setIncludePictures] = useState(true);
-  // Owner decision: a team is shared whole, starter notes included, with a
-  // plain line saying so. The person can switch them off here.
-  const [includeMemory, setIncludeMemory] = useState(true);
+  // Starter notes can hold private facts about the person sharing, so they
+  // go in only when the person ticks the box (the API default is off too).
+  const [includeMemory, setIncludeMemory] = useState(false);
+  // null = "all": whatever fits, as the server decides; a Set = exactly these.
   const [skillChoice, setSkillChoice] = useState<Set<string> | null>(null);
+  const [available, setAvailable] = useState<string[] | null>(null);
+  const [included, setIncluded] = useState<string[] | null>(null);
   const [pictures, setPictures] = useState<{ avatars: Record<string, string>; skipped: string[] } | null>(null);
   const [preview, setPreview] = useState<ShareResponse | null>(null);
   const [saving, setSaving] = useState(false);
@@ -126,26 +171,35 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
     summary,
     release,
     notes,
-    skills: skillChoice ? [...skillChoice] : "all",
+    skills: requestedSkills(skillChoice, available),
     includeMemory,
     ...(includePictures && pictures ? { avatars: pictures.avatars } : {}),
     dryRun,
-  }), [team, name, tagline, summary, release, notes, skillChoice, includeMemory, includePictures, pictures]);
+  }), [team, name, tagline, summary, release, notes, skillChoice, available, includeMemory, includePictures, pictures]);
 
   // Live counts: re-run the server's dry run whenever what goes in changes.
   useEffect(() => {
     if (!pictures) return;
     const id = ++request.current;
+    const all = skillChoice === null;
     const timer = window.setTimeout(() => {
       api<ShareResponse>("/api/teams/export", { method: "POST", body: JSON.stringify(shareRequestBody({ ...choices(true), release: undefined })) })
         .then((result) => {
           if (id !== request.current) return;
           setPreview(result);
+          setAvailable(result.choices.skills);
+          if (all) setIncluded(includedSkills(result.document));
           setError("");
           setRelease((current) => current || result.document.package.release);
         })
         .catch((cause) => {
-          if (id === request.current) setError(cause instanceof Error ? cause.message : String(cause));
+          if (id !== request.current) return;
+          // This choice cannot be saved: no counts and no Save until it
+          // changes, but the skill boxes stay so it can be changed.
+          setPreview(null);
+          const offered = skillChoicesFrom(cause instanceof ApiError ? cause.body : undefined);
+          if (offered) setAvailable(offered);
+          setError(cause instanceof Error ? cause.message : String(cause));
         });
     }, 250);
     return () => window.clearTimeout(timer);
@@ -174,10 +228,9 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
     return () => { if (opener?.isConnected) opener.focus(); };
   }, []);
 
-  const available = preview?.choices.skills ?? [];
-  const chosen = skillChoice ?? new Set(available);
+  const ticked = tickedSkills(skillChoice, included, available);
   const toggleSkill = (skill: string) => {
-    const next = new Set(chosen);
+    const next = new Set(ticked);
     if (next.has(skill)) next.delete(skill);
     else next.add(skill);
     setSkillChoice(next);
@@ -232,18 +285,7 @@ export function ShareTeamDialog({ team, onClose }: { team: string; onClose: () =
                 {t("teamShare.includeNotes")}
               </label>
               <p className="pl-6 text-[12px] leading-relaxed text-ink-secondary">{includeMemory ? t("teamShare.notesIncluded") : t("teamShare.notesExcluded")}</p>
-              <div>
-                <div className="font-medium">{t("teamShare.includeSkills")}</div>
-                {preview && available.length === 0 && <p className="mt-1 text-[12px] text-ink-secondary">{t("teamShare.noSkills")}</p>}
-                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
-                  {available.map((skill) => (
-                    <label key={skill} className="flex items-center gap-1.5 text-[12.5px]">
-                      <input type="checkbox" className="size-3.5 accent-accent" checked={chosen.has(skill)} onChange={() => toggleSkill(skill)} />
-                      {skill}
-                    </label>
-                  ))}
-                </div>
-              </div>
+              <ShareSkillChoices available={available ?? []} ticked={ticked} counted={available !== null} onToggle={toggleSkill} />
             </fieldset>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">

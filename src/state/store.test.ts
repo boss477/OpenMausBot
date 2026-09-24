@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  api,
+  ApiError,
   configStatusFromFrame,
   createStreamDeltaBuffer,
   currentTaskBot,
@@ -27,6 +29,18 @@ import {
 import { openLiveEvents, type LiveEventSourceLike, type LiveEventsPlatform } from "../lib/live-events";
 import type { ModelVariantState, RuntimeEvent } from "../../shared/runtime-events";
 import type { RoutineRun } from "../lib/routines";
+
+describe("api refusals", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("keep the refusal's body for callers that read more than the sentence", async () => {
+    const refusal = { error: "Morgan has more than 30 skills. Choose fewer skills and try again.", choices: { skills: ["a", "b"] } };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(refusal), { status: 400 })));
+    const error = await api("/api/teams/export", { method: "POST", body: "{}" }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ message: refusal.error, status: 400, body: refusal });
+  });
+});
 
 describe("partial profile save responses", () => {
   it.each([true, false])("preserves independently saved fields with about-me response first: %s", aboutFirst => {

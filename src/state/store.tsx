@@ -2302,10 +2302,13 @@ export const initialState: AppState = {
 // ── API client ─────────────────────────────────────────────────────────
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** The refusal's JSON body, for callers that read more than `error`. */
+  readonly body?: Record<string, unknown>;
+  constructor(message: string, status: number, body?: Record<string, unknown>) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -2356,7 +2359,7 @@ export async function api<T = any>(path: string, init?: RequestInit & { timeoutM
         : AbortSignal.timeout(timeoutMs),
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(body.error ?? `${res.status} ${res.statusText}`, res.status);
+  if (!res.ok) throw new ApiError(body.error ?? `${res.status} ${res.statusText}`, res.status, body);
   return body;
 }
 

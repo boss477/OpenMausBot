@@ -118,3 +118,64 @@ it("shares one team whole (minus chat history) and imports it back as new, inert
     await fixture.close();
   }
 }, 120_000);
+
+// A team whose skills cannot all go in one file (a bot with 31, a name two
+// bots hold with different content) and a connection whose address carries
+// its key. The dialog's first look ("all") must still get counts and every
+// skill name; an exact choice that cannot fit is a 400 sentence that still
+// names the skills, never a 500 or a dead end.
+it("never leaves Share team stuck on skills, and keeps keys out of connection addresses", async () => {
+  const fixture = await launchVerificationServer();
+  console.log(JSON.stringify({ fixture: fixture.info }));
+  const url = fixture.info.url;
+  const call = async (method: string, path: string, body?: unknown) => {
+    const response = await fetch(`${url}${path}`, {
+      method, headers: { "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
+  const ok = async (method: string, path: string, body?: unknown) => {
+    const result = await call(method, path, body);
+    if (result.status >= 300) throw new Error(`${method} ${path} → ${result.status} ${JSON.stringify(result.body)}`);
+    return result.body;
+  };
+  const addSkill = (botId: string, name: string, heading = name) => ok("POST", `/api/bots/${botId}/skill-template`, {
+    name, description: `${name} steps.`, source: "fixture", text: `---\nname: ${name}\ndescription: ${name} steps.\n---\n\n# ${heading}\n`, enabled: true,
+  });
+  try {
+    const lead = (await ok("POST", "/api/bots", { name: "Morgan", section: "Crowded desk" })).bot;
+    const scout = (await ok("POST", "/api/bots", { name: "Scout", section: "Crowded desk" })).bot;
+    const names = Array.from({ length: 31 }, (_, index) => `step-${String(index + 1).padStart(2, "0")}`);
+    for (const name of names) await addSkill(lead.id, name);
+    await addSkill(lead.id, "pricing", "Lead pricing");
+    await addSkill(scout.id, "pricing", "Scout pricing");
+    await ok("POST", "/api/mcp/servers", { name: "zap", type: "http", url: "https://mcp.zapier.com/api/mcp/s/ZTJmNDk1YjMtNjQ0Yi00ZjU2LWI1ZjY/mcp", enabled: true });
+    await ok("PATCH", `/api/bots/${lead.id}`, { mcpServers: ["zap"] });
+
+    const body = { format: "package", version: 2, team: "Crowded desk", dryRun: true };
+    const all = await ok("POST", "/api/teams/export", body);
+    expect(all.choices.skills).toEqual([...names, "pricing"].sort());
+    expect(all.document.package.agents.find((agent: { key: string }) => agent.key === "morgan").skills).toHaveLength(30);
+    expect(all.skipped).toEqual(expect.arrayContaining([
+      { part: "skills[pricing]", reason: "skill_conflict" },
+      { part: "agents[morgan].skills[step-31]", reason: "bot_skill_limit" },
+    ]));
+    expect(all.document.package.connections[0].mcp.url).toBe("https://mcp.zapier.com/api/mcp/s/redacted/mcp");
+    expect(all.redacted).toContain("connections[zap].mcp.url");
+    expect(JSON.stringify(all.document)).not.toContain("ZTJmNDk1YjMtNjQ0Yi00ZjU2LWI1ZjY");
+
+    const crowded = await call("POST", "/api/teams/export", { ...body, skills: names });
+    expect(crowded).toEqual({ status: 400, body: { error: "Morgan has more than 30 skills. Choose fewer skills and try again.", choices: { skills: all.choices.skills } } });
+    const conflict = await call("POST", "/api/teams/export", { ...body, skills: ["pricing"] });
+    expect(conflict).toEqual({ status: 400, body: {
+      error: 'Two bots in this team have different skills named "pricing". Leave that skill out and try again.', choices: { skills: all.choices.skills } } });
+    const unknown = await call("POST", "/api/teams/export", { ...body, skills: ["gone"] });
+    expect(unknown.status).toBe(400);
+    expect(unknown.body.choices.skills).toEqual(all.choices.skills);
+    // Unticking one of the lead's skills is a choice that fits.
+    const fits = await ok("POST", "/api/teams/export", { ...body, skills: names.slice(1) });
+    expect(fits.document.package.skills.entries).toHaveLength(30);
+  } finally {
+    await fixture.close();
+  }
+}, 120_000);

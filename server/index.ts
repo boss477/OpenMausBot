@@ -2444,18 +2444,21 @@ function collectExportSkills(
 /** Skills on one team's bots for a whole-team share. "all" skips a skill
  * whose stored SKILL.md changed (listed to the person); an explicit list
  * refuses instead, because the person asked for that exact skill. */
+/** The team's skills for a whole-team export. `available` (every skill name
+ * on the team's bots) comes back on refusals too: the Share dialog draws its
+ * skill choices from it, so a refused choice can always be changed. */
 function collectTeamSkills(
   bots: readonly BotRecord[],
   selection: unknown,
-): { ok: true; skillsByBot: Map<string, ExportablePackageSkill[]>; skipped: TeamExportSkip[]; available: string[] } | { ok: false; error: string } {
+): { ok: true; all: boolean; skillsByBot: Map<string, ExportablePackageSkill[]>; skipped: TeamExportSkip[]; available: string[] } | { ok: false; error: string; available: string[] } {
   const all = selection === undefined || selection === "all";
-  if (!all && (!Array.isArray(selection) || selection.some((name) => typeof name !== "string" || !isSkillName(name)))) {
-    return { ok: false, error: "skills must be \"all\" or a list of skill names" };
-  }
   const available = [...new Set(bots.flatMap((bot) => listSkills(bot.id).map((skill) => skill.name)))].sort();
+  if (!all && (!Array.isArray(selection) || selection.some((name) => typeof name !== "string" || !isSkillName(name)))) {
+    return { ok: false, error: "skills must be \"all\" or a list of skill names", available };
+  }
   const chosen = new Set(all ? available : selection as string[]);
   const unknown = [...chosen].find((name) => !available.includes(name));
-  if (unknown) return { ok: false, error: `This team has no skill named "${unknown}"` };
+  if (unknown) return { ok: false, error: `This team has no skill named "${unknown}"`, available };
   const skillsByBot = new Map<string, ExportablePackageSkill[]>();
   const skipped: TeamExportSkip[] = [];
   for (const bot of bots) {
@@ -2464,7 +2467,7 @@ function collectTeamSkills(
       if (!chosen.has(listing.name)) continue;
       const instructions = readSkillFile(bot.id, listing.name);
       if (instructions === null) {
-        if (!all) return { ok: false, error: `Skill "${listing.name}" changed or is unavailable and cannot be shared safely` };
+        if (!all) return { ok: false, error: `Skill "${listing.name}" changed or is unavailable and cannot be shared safely`, available };
         const part = `skills[${listing.name}]`;
         if (!skipped.some((skip) => skip.part === part)) skipped.push({ part, reason: "skill_changed" });
         continue;
@@ -2476,11 +2479,12 @@ function collectTeamSkills(
         ...(listing.license ? { license: listing.license } : {}),
         ...(listing.compatibility ? { compatibility: listing.compatibility } : {}),
         instructions,
+        enabled: listing.enabled,
       });
     }
     if (assigned.length) skillsByBot.set(bot.id, assigned);
   }
-  return { ok: true, skillsByBot, skipped, available };
+  return { ok: true, all, skillsByBot, skipped, available };
 }
 
 /** A bot's starter notes: MEMORY.md and its topic files. Daily logs never
@@ -15576,7 +15580,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const optional = (value: unknown) => (typeof value === "string" ? value : undefined);
         const teamBots = store.bots.filter((bot) => !bot.hidden && sectionKey(bot.section) === team);
         const skills = collectTeamSkills(teamBots, body.skills);
-        if (!skills.ok) return json(res, 400, { error: skills.error });
+        if (!skills.ok) return json(res, 400, { error: skills.error, choices: { skills: skills.available } });
         const avatars = body.avatars && typeof body.avatars === "object" && !Array.isArray(body.avatars)
           ? body.avatars as Record<string, unknown>
           : undefined;
@@ -15595,6 +15599,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             brief: readSectionContext(team)?.text,
             published: readPublishedTeam(team),
             skillsByBot: skills.skillsByBot,
+            skillSelection: skills.all ? "all" : "chosen",
             memoryByBot: body.includeMemory === true ? new Map(teamBots.map((bot) => [bot.id, starterNotes(bot.id)])) : undefined,
             avatars,
             mcpServers: cfg.mcpServers ?? {},
@@ -15612,7 +15617,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             choices: { skills: skills.available },
           });
         } catch (error) {
-          if (error instanceof TeamExportError) return json(res, error.status, { error: error.message });
+          if (error instanceof TeamExportError) return json(res, error.status, { error: error.message, choices: { skills: skills.available } });
           throw error;
         }
       }

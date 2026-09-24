@@ -11,16 +11,27 @@ the team name), or from **Templates → Share**.
   its colour and mascot, and its picture (downscaled to at most 256 × 256 and
   64 KB; the dialog stops adding pictures after about 2 MB of them).
 - **Skills.** All skills on the team's bots by default, or the ones you tick.
-  Only the `SKILL.md` text travels, never scripts or other files.
+  Only the `SKILL.md` text travels, never scripts or other files. A file
+  holds at most 30 skills per bot and 60 per team, and one skill per name.
+  When you have not chosen, the dialog puts in what fits (switched-on skills
+  first) and lists the rest under **Left out**, including a name two bots
+  hold with different content. When you tick more than fits, it says why and
+  keeps every skill box so you can change the choice.
 - **Playbooks**, **group chats** (members and who answers by default) and the
   team's **shared instructions**.
 - **Routines**, including group chat goals. They always arrive paused.
 - **The Chief of Staff.**
 - **Connections.** For each remote MCP server a bot uses: its address and the
   names of the values it needs (for example `Authorization`). The values
-  themselves never travel.
-- **Starter notes.** Each bot's `MEMORY.md` and topic notes. The dialog
-  includes them unless you switch them off; daily logs never go in.
+  themselves never travel. Hosted servers often keep their key in the address
+  itself, so an address loses any sign-in part and `#fragment`, keeps its
+  query names with the values emptied (`?key=`), and has every path segment
+  that looks like a key (long, letters and digits mixed, such as a token or
+  a server id) replaced with `redacted`. The dialog lists each connection's
+  full address before you save, and names any address it changed.
+- **Starter notes.** Each bot's `MEMORY.md` and topic notes, only when you
+  tick **Include starter notes** (they can hold private details about you).
+  Daily logs never go in.
 - **Connector requirements** (which connected apps the team expects), as
   labels only.
 
@@ -87,5 +98,9 @@ The HTTP route is `POST /api/teams/export` with
 fields: `name`, `tagline`, `summary`, `release`, `notes`, `skills` (`"all"` or
 names), `includeMemory` (default `false` over the API), `avatars` (data URLs
 by bot id) and `dryRun` (count without recording keys). The response is
-`{document, filename, redacted, skipped, summary, choices}`. A body without
+`{document, filename, redacted, skipped, summary, choices}`. With
+`skills: "all"` the export puts in the skills that fit and lists the rest in
+`skipped`; a list of names is shared exactly or refused. Every `400` from a
+version 2 body also carries `choices: {skills}` (every skill name on the
+team's bots), so a client can offer a different choice. A body without
 `version: 2` keeps the original whole-installation Markdown export.

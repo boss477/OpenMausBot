@@ -291,6 +291,11 @@ posixOnly("per-bot visibility on a shared workspace", () => {
     expect(await status("GET", `/api/threads/${ids.hrThread}/messages`, ADA)).toBe(200);
     expect(await status("GET", `/api/threads/${ids.hrThread}/export`, ADA)).toBe(200);
     expect(await status("GET", `/api/attachments/${ids.hrImage}`, ADA)).toBe(200);
+    // Attachment responses vary by who asks, so a browser must not keep one
+    // member's copy past another member's 404.
+    const hrImage = await fetch(`${BASE}/api/attachments/${ids.hrImage}`, { headers: headers(ADA, false) });
+    expect(hrImage.status).toBe(200);
+    expect(hrImage.headers.get("cache-control")).toBe("private, no-store");
     expect(await status("GET", `/api/attachments/${ids.avatar}`, ADA)).toBe(200);
     expect(await status("GET", `/api/threads/${ids.hrThread}/messages`, ADA)).toBe(200);
     expect(await status("GET", `/api/threads/${ids.hrThread}/messages`, BOSS)).toBe(200);

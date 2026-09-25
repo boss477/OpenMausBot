@@ -1098,6 +1098,19 @@ public struct CompanionClient: Sendable {
         return data
     }
 
+    /// Fetch a parked voice note with the paired-device bearer token — the
+    /// same authenticated /api/attachments route avatar bytes ride, never a
+    /// bare URL a page could steer. The name follows the route's own
+    /// discipline (readAttachment in server/attachments.ts): one bare
+    /// generated mp3 filename.
+    public func voiceNote(path: String) async throws -> Data {
+        guard let name = Self.voiceNoteFileName(path) else { throw APIError.badURL }
+        let request = try makeRequest("GET", "/api/attachments/\(name)")
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        return data
+    }
+
     private static func validAvatarPath(_ path: String) -> Bool {
         let prefix = "/api/attachments/"
         guard path.hasPrefix(prefix) else { return false }
@@ -1114,6 +1127,30 @@ public struct CompanionClient: Sendable {
                 || byte == 45
         }
         return validStem && ["png", "jpg", "gif", "webp"].contains(String(ext))
+    }
+
+    /// The attachment route resolves exactly one bare `[A-Za-z0-9-]+.mp3`
+    /// filename; anything else must not become a request. Directory parts
+    /// are dropped the way the web bubble's attachmentBasename drops them,
+    /// and the full /api/attachments/ prefix is tolerated like avatar paths.
+    static func voiceNoteFileName(_ path: String) -> String? {
+        var name = path
+        if name.hasPrefix("/api/attachments/") {
+            name = String(name.dropFirst("/api/attachments/".count))
+        }
+        if let slash = name.lastIndex(of: "/") {
+            name = String(name[name.index(after: slash)...])
+        }
+        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return nil }
+        let stem = name[..<dot]
+        let ext = name[name.index(after: dot)...]
+        let validStem = !stem.isEmpty && stem.utf8.allSatisfy { byte in
+            (48...57).contains(byte)
+                || (65...90).contains(byte)
+                || (97...122).contains(byte)
+                || byte == 45
+        }
+        return validStem && ext == "mp3" ? name : nil
     }
 
     public func voices() async throws -> [Voice] {

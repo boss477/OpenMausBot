@@ -60,7 +60,7 @@
           "unread": false
         }
       ],
-      "activeLeafId": "preview-gmail-reply",
+      "activeLeafId": "preview-gmail-voice",
       "messages": [
         {
           "id": "preview-gmail-user",
@@ -100,6 +100,22 @@
           "kind": "text",
           "at": 1789088430000,
           "text": "I’m reviewing Gmail here. Your iCloud conversation has its own context."
+        },
+        {
+          "id": "preview-gmail-voice",
+          "parentId": "preview-gmail-reply",
+          "role": "bot",
+          "kind": "text",
+          "at": 1789088440000,
+          "text": "Here’s this morning’s triage as a voice note.",
+          "attachments": [
+            {
+              "kind": "audio",
+              "path": "preview-voice-note.mp3",
+              "mime": "audio/mpeg",
+              "durationMs": 6000
+            }
+          ]
         }
       ]
     }

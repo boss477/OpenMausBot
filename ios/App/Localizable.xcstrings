@@ -1,6 +1,46 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "Play voice note": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reproduzir nota de voz"
+          }
+        }
+      }
+    },
+    "Pause voice note": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pausar nota de voz"
+          }
+        }
+      }
+    },
+    "Voice note position": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Posição da nota de voz"
+          }
+        }
+      }
+    },
+    "Couldn’t load the voice note.": {
+      "localizations": {
+        "pt-BR": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Não foi possível carregar a nota de voz."
+          }
+        }
+      }
+    },
     "completed": {
       "localizations": {
         "pt-BR": {

@@ -70,3 +70,21 @@ describe("send_voice_note", () => {
   });
 });
 
+describe("create_bot", () => {
+  it("passes a working folder through to the internal create route", async () => {
+    const calls: Array<{ path: string; body: any }> = [];
+    const result = await callTool("create_bot", { name: "Scout", role: "Ops", instructions: "Work.", cwd: "  /tmp/ops  " }, context({
+      client: {
+        api: async (path, init) => {
+          calls.push({ path, body: JSON.parse(String(init?.body)) });
+          return { id: "b1", name: "Scout", section: "Work" };
+        },
+        apiResponse: async () => ({ ok: true, status: 200, body: {} }),
+      },
+    }));
+    expect(result.isError).toBeFalsy();
+    expect(calls).toEqual([
+      { path: "/api/internal/create-bot", body: { fromBotId: "bot-voice", fromThreadId: "thread-voice", name: "Scout", role: "Ops", instructions: "Work.", cwd: "/tmp/ops" } },
+    ]);
+  });
+});

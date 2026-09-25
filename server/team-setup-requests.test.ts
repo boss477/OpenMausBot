@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { TeamSetupError, TeamSetupRequestService } from "./team-setup-requests.ts";
 import { canAccessTeam } from "./peer-roster.ts";
 import type { BotRecord, OptionCardData } from "./store.ts";
@@ -112,6 +116,36 @@ describe("reviewed Chief team setup", () => {
     const card = h.propose([specialist("Mira", "Research"), { action: "update", botId: h.chief.id, fields: { chiefOfStaff: false } }], ["Research"]);
     expect(card.detail).toContain('Create teams: "Research"');
     expect(card.detail).not.toContain("Authorize @Clive");
+  });
+  it("shows what stays owner-owned after creation on create cards, and keeps update cards lean", () => {
+    const h = harness();
+    const create = h.propose([specialist("Mira", "Work")]);
+    expect(create.detail).toContain("New bots stay owner-owned after creation: connected apps off, approvals at Ask, a private workspace by default, avatar untouched.");
+    expect(create.detail).toContain("Existing execution permissions are unchanged.");
+    const update = h.propose([{ action: "update", botId: h.peer.id, fields: { title: "Research lead" } }]);
+    expect(update.detail).not.toContain("owner-owned");
+    expect(update.detail).toContain("Existing execution permissions are unchanged.");
+  });
+  it("accepts a working folder on create only, with the profile path's exact validation copy", () => {
+    const h = harness();
+    const mira = specialist("Mira", "Work");
+    const folder = mkdtempSync(join(tmpdir(), "omb-team-cwd-"));
+    const withFolder = h.propose([{ ...mira, fields: { ...mira.fields, cwd: folder } }]);
+    expect(withFolder.detail).toContain(`Working folder: ${JSON.stringify(folder)}`);
+    expect(() => h.propose([{ ...mira, fields: { ...mira.fields, cwd: "relative/path" } }]))
+      .toThrow("working folder must be an absolute path");
+    expect(() => h.propose([{ ...mira, fields: { ...mira.fields, cwd: join(folder, "missing") } }]))
+      .toThrow(`that folder doesn't exist: ${join(folder, "missing")}`);
+    expect(() => h.propose([{ action: "update", botId: h.peer.id, fields: { cwd: folder } }]))
+      .toThrow("A working folder can only be chosen when creating a bot; propose_profile changes it later");
+  });
+  it("carries a model variant through the plan instead of dropping it", () => {
+    const h = harness();
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: { modelSelection: { instanceId: "claude", model: "sonnet", variant: "stable" } } }]);
+    expect(card.detail).toContain("Default engine/model:");
+    // A variant-only change must render as a real before-and-after, never
+    // an identical pair with the variant silently stripped.
+    expect(card.detail).toContain('{"instanceId":"claude","model":"sonnet"} → {"instanceId":"claude","model":"sonnet","variant":"stable"}');
   });
   it("coalesces each bot's fields into one review and applies once with a durable receipt", async () => {
     const h = harness();

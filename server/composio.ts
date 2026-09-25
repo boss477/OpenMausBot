@@ -5,6 +5,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
+import { CONNECTOR_TOOL_NAME_PATTERN, type ConnectorToolGrant } from "../shared/wire.ts";
+import {
+  CONNECTOR_ALLOWED_TOOLS_ENV,
+  CONNECTOR_ALLOWED_TOOLS_MAX_BYTES,
+  CONNECTOR_SERVICE_SLUGS_ENV,
+  CONNECTOR_SERVICE_SLUGS_MAX_BYTES,
+  serializeConnectorAllowedTools,
+  serializeConnectorServiceSlugs,
+} from "./connector-advertisement.ts";
+import { serviceSlugFor, serviceSlugForCandidates } from "./connector-verdict.ts";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
 
@@ -143,6 +153,10 @@ interface IntegrationContext {
   commsToken: string;
   botId: string;
   threadId: string;
+  /** The bot's connector tool grants (issue #1737): undefined is the
+   * legacy all-tools bot and gets no advertisement filtering; a record —
+   * including the empty one — filters the bridge's tools/list. */
+  connectorTools?: Record<string, ConnectorToolGrant>;
 }
 
 let managedBrokerAccess: { url: string; token: string } | null | undefined;
@@ -538,6 +552,34 @@ export async function mcpIntegration(
   context: IntegrationContext,
 ): Promise<ComposioMcpIntegration | null> {
   if (!configured(cfg)) return null;
+  // Connector grants 3/5: a grants record rides to the bridge as a capped
+  // JSON env var so tools/list is filtered down to what the bot may call.
+  // No record (legacy all-tools bots) or one past the cap mounts without
+  // the var — the bridge then relays the unfiltered list and every call is
+  // still judged by the slice-2 verdict on the relay endpoint.
+  const allowlist = context.connectorTools === undefined
+    ? undefined
+    : serializeConnectorAllowedTools(context.connectorTools);
+  if (allowlist?.oversized) {
+    console.warn(
+      `[composio] connector allowlist for bot ${context.botId} exceeds ${CONNECTOR_ALLOWED_TOOLS_MAX_BYTES} bytes;`
+      + " tools/list stays unfiltered and grants are enforced per call",
+    );
+  }
+  // The connected-service slugs ride alongside the allowlist so the
+  // bridge resolves underscored services (bland_ai) instead of letting a
+  // plain-prefix grant (bland) widen them. An unreachable catalog omits
+  // the var and the filter keeps its plain-split fallback; legacy
+  // all-tools bots mount without it because their list is unfiltered.
+  const serviceSlugs = context.connectorTools === undefined
+    ? undefined
+    : serializeConnectorServiceSlugs(await connectedServiceSlugs(cfg));
+  if (serviceSlugs?.oversized) {
+    console.warn(
+      `[composio] connector service slugs for bot ${context.botId} exceed ${CONNECTOR_SERVICE_SLUGS_MAX_BYTES} bytes;`
+      + " tools/list falls back to plain-prefix resolution",
+    );
+  }
   return {
     command: process.execPath,
     args: [SPAWNED_PROXIES.connectors],
@@ -555,6 +597,8 @@ export async function mcpIntegration(
       OMB_CONNECTOR_TOKEN: context.commsToken,
       OMB_BOT_ID: context.botId,
       OMB_THREAD_ID: context.threadId,
+      ...(allowlist?.env ? { [CONNECTOR_ALLOWED_TOOLS_ENV]: allowlist.env } : {}),
+      ...(serviceSlugs?.env ? { [CONNECTOR_SERVICE_SLUGS_ENV]: serviceSlugs.env } : {}),
     },
   };
 }
@@ -778,6 +822,271 @@ export async function connectedServices(cfg: AppConfig): Promise<Record<string, 
     listConnectedAccounts(apiKey, userId, []).catch(() => []),
   ]);
   return allServiceStates(summarizeAccounts(accounts, []), toolkits);
+}
+
+/** Semantic validation for a connectorTools patch (issue #1737): slugs
+ * must name a connected service, and every listed tool name must carry its
+ * own service prefix (GMAIL_SEND_EMAIL under "gmail") — a mismatched name
+ * would be granted yet permanently refused at call time. The prefix check
+ * resolves against the connected-service slugs, so an underscored service
+ * (bland_ai) keeps its BLAND_AI_* names and a plain-prefix grant cannot
+ * capture them; it always runs, degrading to the plain split when the
+ * connection inventory is unreachable. Only the connection-dependent and
+ * catalog checks fail open — an unreachable connection inventory, the
+ * curated fallback, or a catalog walk that did not reach its end never
+ * block the patch, because call-time enforcement (slice 2) stays the
+ * authority either way. Returns the rejection message or null. */
+export async function validateConnectorGrants(
+  cfg: AppConfig,
+  grants: Record<string, ConnectorToolGrant>,
+): Promise<string | null> {
+  const connected = await connectedServices(cfg).catch(() => null);
+  const candidates = connected ? Object.keys(connected) : [];
+  for (const [slug, grant] of Object.entries(grants)) {
+    if (grant.tools === "*") continue;
+    // The prefix check runs against the connected-service slugs, so an
+    // underscored service (bland_ai) accepts its own BLAND_AI_* names —
+    // and a plain-prefix grant cannot capture them while the real service
+    // is connected.
+    const misplaced = grant.tools.filter(
+      (tool) => (serviceSlugForCandidates(tool, candidates) ?? serviceSlugFor(tool)) !== slug,
+    );
+    if (misplaced.length) {
+      return `connectorTools.${slug}.tools names tools that belong to another service: ${misplaced.join(", ")}`;
+    }
+  }
+  if (!connected) return null;
+  const unconnected = Object.keys(grants).filter((slug) => !connected[slug]?.connected);
+  if (unconnected.length) {
+    return `connectorTools names services that are not connected: ${unconnected.join(", ")}`;
+  }
+  const catalog = await listToolkits(cfg);
+  // source "curated" means the marketplace was unreachable, and a walk that
+  // never reached its natural end served only part of it — either way there
+  // is nothing trustworthy to cross-check against, and a grant for a service
+  // on a page the walk never saw must not be rejected.
+  if (catalog.source !== "api" || !catalog.pagination?.complete) return null;
+  const known = new Set(catalog.cards.map((card) => card.slug.toLowerCase()));
+  const unknown = Object.keys(grants).filter((slug) => !known.has(slug));
+  if (unknown.length) {
+    return `connectorTools names services missing from the connected-apps catalog: ${unknown.join(", ")}`;
+  }
+  return null;
+}
+
+/** One grantable tool as the web editor lists it. Descriptions are search
+ * aids trimmed to a card-sized line, never a contract. */
+export interface ConnectorToolListing {
+  name: string;
+  description?: string;
+}
+
+/** The grant editor's tool inventory, grouped by service slug. Sourced from
+ * the same MCP endpoint the bots' bridge relays to (initialize + tools/list
+ * through relayMcp), so what the picker offers is exactly what a granted bot
+ * would see — in self-hosted and managed modes alike. Platform meta-tools
+ * and per-service connection flows are not per-tool grants (they ride along
+ * whenever a service is granted), so they never appear in the picker. */
+export async function listConnectorTools(
+  cfg: AppConfig,
+  options: { force?: boolean } = {},
+): Promise<Record<string, ConnectorToolListing[]>> {
+  const identity = connectorToolsIdentity(cfg);
+  if (!options.force && connectorToolsCache?.identity === identity
+    && Date.now() - connectorToolsCache.at < CONNECTOR_TOOLS_CACHE_MS) {
+    return connectorToolsCache.services;
+  }
+  // Concurrent misses share one MCP walk — two editors opening together
+  // must not run the initialize + tools/list sequences twice. force
+  // bypasses the settled cache but still joins a walk already running.
+  if (connectorToolsRequest?.identity === identity) return connectorToolsRequest.services;
+  const walk = collectConnectorTools(cfg).then((services) => {
+    connectorToolsCache = { at: Date.now(), identity, services };
+    return services;
+  });
+  connectorToolsRequest = { identity, services: walk };
+  try {
+    return await walk;
+  } finally {
+    if (connectorToolsRequest?.services === walk) connectorToolsRequest = null;
+  }
+}
+
+const CONNECTOR_TOOLS_CACHE_MS = 60_000;
+let connectorToolsCache: { at: number; identity: string; services: Record<string, ConnectorToolListing[]> } | null = null;
+/** Which backend an inventory walk belongs to, mirroring the relay's own
+ * credential fingerprint: a project key or the managed broker. Cached
+ * inventories are keyed by it, so a config switch can never serve the
+ * previous backend's tools for another cache window. */
+function connectorToolsIdentity(cfg: AppConfig): string {
+  const apiKey = projectApiKey(cfg);
+  if (apiKey) return backendFingerprint("project-tools", apiBase(), apiKey);
+  const broker = brokerAccess();
+  return broker ? backendFingerprint("managed-tools", broker.url, broker.token) : "none";
+}
+
+let connectorToolsRequest: { identity: string; services: Promise<Record<string, ConnectorToolListing[]>> } | null = null;
+
+/** The service slugs grant enforcement resolves tool-name prefixes
+ * against: every key of the connection inventory, connected or not,
+ * because the real backend slugs are what separates an underscored
+ * service (bland_ai) from a plain-prefix grant (bland). Cached like the
+ * tool inventory — 60s, keyed by backend identity, one shared in-flight
+ * walk — and an unreachable inventory reads as an empty list without
+ * caching the failure, so callers fall back to the plain split and the
+ * next call retries. */
+export async function connectedServiceSlugs(cfg: AppConfig): Promise<readonly string[]> {
+  const identity = connectorToolsIdentity(cfg);
+  if (connectorServiceSlugsCache?.identity === identity
+    && Date.now() - connectorServiceSlugsCache.at < CONNECTOR_SERVICE_SLUGS_CACHE_MS) {
+    return connectorServiceSlugsCache.slugs;
+  }
+  if (connectorServiceSlugsRequest?.identity === identity) return connectorServiceSlugsRequest.slugs;
+  const walk = connectedServices(cfg).then(
+    (services) => {
+      const slugs = Object.keys(services);
+      connectorServiceSlugsCache = { at: Date.now(), identity, slugs };
+      return slugs;
+    },
+    () => [] as readonly string[],
+  );
+  connectorServiceSlugsRequest = { identity, slugs: walk };
+  try {
+    return await walk;
+  } finally {
+    if (connectorServiceSlugsRequest?.slugs === walk) connectorServiceSlugsRequest = null;
+  }
+}
+
+const CONNECTOR_SERVICE_SLUGS_CACHE_MS = 60_000;
+let connectorServiceSlugsCache: { at: number; identity: string; slugs: readonly string[] } | null = null;
+let connectorServiceSlugsRequest: { identity: string; slugs: Promise<readonly string[]> } | null = null;
+
+/** Tool names longer than any Composio description worth searching. */
+const TOOL_DESCRIPTION_MAX = 240;
+const TOOLS_LIST_PAGES_MAX = 10;
+
+function connectorToolListing(tool: unknown): ConnectorToolListing | null {
+  if (!tool || typeof tool !== "object" || Array.isArray(tool)) return null;
+  const name = (tool as { name?: unknown }).name;
+  if (typeof name !== "string" || !CONNECTOR_TOOL_NAME_PATTERN.test(name)) return null;
+  if (name.startsWith("COMPOSIO_")) return null;
+  if (name.endsWith("_MANAGE_CONNECTIONS") || name.endsWith("_WAIT_FOR_CONNECTIONS")) return null;
+  const description = (tool as { description?: unknown }).description;
+  const trimmed = typeof description === "string"
+    ? description.replace(/\s+/g, " ").trim().slice(0, TOOL_DESCRIPTION_MAX)
+    : "";
+  return trimmed ? { name, description: trimmed } : { name };
+}
+
+/** One JSON-RPC response frame from a JSON or SSE body, mirroring the
+ * bridge's parseUpstream: SSE data lines are tried in order and the frame
+ * carrying the request id wins. */
+function parseMcpResponse(text: string, id: string | number): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const candidate = (value: unknown): value is Record<string, unknown> =>
+    Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  if (trimmed.startsWith("{")) {
+    const parsed: unknown = JSON.parse(trimmed);
+    return candidate(parsed) ? parsed : null;
+  }
+  const frames = trimmed
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .filter((line) => line && line !== "[DONE]")
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line) as unknown];
+      } catch {
+        return [];
+      }
+    })
+    .filter(candidate);
+  return frames.findLast((frame) => frame.id === id) ?? frames.at(-1) ?? null;
+}
+
+async function collectConnectorTools(cfg: AppConfig): Promise<Record<string, ConnectorToolListing[]>> {
+  // Connected services are the real slugs, so they resolve underscored
+  // services (bland_ai) the plain split would file under "bland"; an
+  // unreachable inventory degrades to that split.
+  const connected = await connectedServices(cfg).catch(() => null);
+  const candidates = connected ? Object.keys(connected) : [];
+  const initialize = await relayMcp(cfg, {
+    jsonrpc: "2.0",
+    id: "omb-grants-initialize",
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "openmausbot-grant-editor", version: "1" },
+    },
+  });
+  if (initialize.status !== 200) {
+    throw new Error(await responseErrorFromBytes(initialize.status, initialize.bytes));
+  }
+  const transportSessionId = initialize.transportSessionId;
+  // Streamable-HTTP servers expect the handshake notification before the
+  // first request; it carries no response, so failures are not fatal.
+  await relayMcp(cfg, {
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+  }, transportSessionId).catch(() => undefined);
+  const grouped = new Map<string, ConnectorToolListing[]>();
+  let cursor: string | undefined;
+  for (let page = 0; page < TOOLS_LIST_PAGES_MAX; page += 1) {
+    const list = await relayMcp(cfg, {
+      jsonrpc: "2.0",
+      id: "omb-grants-tools",
+      method: "tools/list",
+      params: cursor ? { cursor } : {},
+    }, transportSessionId);
+    if (list.status !== 200) {
+      throw new Error(await responseErrorFromBytes(list.status, list.bytes));
+    }
+    const frame = parseMcpResponse(new TextDecoder().decode(list.bytes), "omb-grants-tools");
+    const error = frame && typeof frame.error === "object" && frame.error !== null
+      ? (frame.error as { message?: unknown }).message
+      : undefined;
+    if (typeof error === "string" && error) throw new Error(error);
+    const result = frame && typeof frame.result === "object" && frame.result !== null
+      ? (frame.result as { tools?: unknown; nextCursor?: unknown })
+      : undefined;
+    if (!result || !Array.isArray(result.tools)) {
+      throw new Error("Composio returned a tools/list response without a tools array");
+    }
+    for (const tool of result.tools) {
+      const listing = connectorToolListing(tool);
+      if (!listing) continue;
+      const slug = serviceSlugForCandidates(listing.name, candidates) ?? serviceSlugFor(listing.name);
+      if (!slug) continue;
+      const bucket = grouped.get(slug) ?? [];
+      if (!bucket.some((existing) => existing.name === listing.name)) bucket.push(listing);
+      grouped.set(slug, bucket);
+    }
+    cursor = typeof result.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
+    if (!cursor) break;
+  }
+  for (const bucket of grouped.values()) bucket.sort((a, b) => a.name.localeCompare(b.name));
+  return Object.fromEntries([...grouped.entries()].sort(([a], [b]) => a.localeCompare(b)));
+}
+
+async function responseErrorFromBytes(status: number, bytes: Uint8Array): Promise<string> {
+  try {
+    const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    const message = body && typeof body === "object" && !Array.isArray(body)
+      ? (body as { error?: unknown }).error
+      : undefined;
+    if (message && typeof message === "object" && !Array.isArray(message)) {
+      const text = (message as { message?: unknown }).message;
+      if (typeof text === "string" && text) return text;
+    }
+    if (typeof message === "string" && message) return message;
+  } catch {
+    // fall through to the generic status line
+  }
+  return `Composio tools/list: HTTP ${status}`;
 }
 
 export async function connectionStatus(cfg: AppConfig, slugs: string[]) {
@@ -1022,6 +1331,11 @@ export interface CatalogPagination {
   totalItems?: number;
   /** True when paging stopped before the reported total. */
   stalled: boolean;
+  /** True only when the walk reached its natural end — the last page
+   * offered no cursor, or the reported page counts said done — without
+   * stalling. stalled needs upstream totals to compare against; complete
+   * also covers a mid-walk failure on an API that reports none. */
+  complete: boolean;
 }
 
 /**
@@ -1132,7 +1446,12 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
         const pagingStoppedEarly = lastReportedPage !== undefined
           && reportedTotalPages !== undefined
           && lastReportedPage < reportedTotalPages;
-        const pagination: CatalogPagination = { items: uniqueCards.length, stalled: shortOfReportedTotal || pagingStoppedEarly };
+        const stalled = shortOfReportedTotal || pagingStoppedEarly;
+        // "end" and "total-reached" are the walk's natural finishes; every
+        // other stop reason left pages unread even when the API reports no
+        // totals for stalled to compare against.
+        const complete = (stop === "end" || stop === "total-reached") && !stalled;
+        const pagination: CatalogPagination = { items: uniqueCards.length, stalled, complete };
         if (reportedTotalItems !== undefined) pagination.totalItems = reportedTotalItems;
         if (pagination.stalled) {
           console.warn(

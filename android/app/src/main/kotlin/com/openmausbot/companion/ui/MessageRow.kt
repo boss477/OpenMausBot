@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -44,6 +45,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -61,6 +63,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -80,6 +84,7 @@ import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.AttachedMessageContent
 import com.openmausbot.companion.core.generatedImages
+import com.openmausbot.companion.core.voiceNotes
 import com.openmausbot.companion.core.DisplayedMessageAttachment
 import com.openmausbot.companion.core.DownloadedFile
 import com.openmausbot.companion.core.Message
@@ -92,6 +97,7 @@ import com.openmausbot.companion.core.webhookContent
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -494,6 +500,11 @@ private fun TextBubble(
                     )
                 }
             }
+            // Voice notes sit above the attachment gallery, as they do on the
+            // desktop transcript: the note is the message, not an appendix to it.
+            message.voiceNotes.forEach { note ->
+                VoiceNoteAttachmentView(threadId, message, note)
+            }
             message.generatedImages.forEach { attachment ->
                 SharedAttachmentView(threadId, message, attachment, openAttachment)
             }
@@ -678,6 +689,192 @@ private fun AttachmentLoadFailure(label: String, foreground: Color = BubbleColor
         )
         Text(label, fontSize = 13.sp, color = foreground.copy(alpha = 0.80f))
         TextButton(onClick = onRetry) { Text("Retry") }
+    }
+}
+
+/** Where the bubble's clip bytes are: fetched on first play, then kept for replay. */
+private sealed interface VoiceNoteClipState {
+    data object NotLoaded : VoiceNoteClipState
+    data object Loading : VoiceNoteClipState
+    data class Ready(val data: ByteArray) : VoiceNoteClipState
+    data object Failed : VoiceNoteClipState
+}
+
+/** The desktop bubble's clock: m:ss, and 0:00 for anything not yet audible. */
+private fun voiceNoteClock(ms: Long): String {
+    if (ms <= 0) return "0:00"
+    val wholeSeconds = ms / 1000
+    return (wholeSeconds / 60).toString() + ":" + (wholeSeconds % 60).toString().padStart(2, '0')
+}
+
+/**
+ * One voice note in the transcript, matching the desktop VoiceNoteBubble:
+ * a play button, a scrub bar, and the clip's length. Playback is app-scoped
+ * (CompanionEnvironment.voiceNotes), so a note keeps playing while its row
+ * scrolls away, and the one-voice rule rides the same audio-focus gate the
+ * TTS preview uses: starting a note (or a preview) pauses any other voice
+ * rather than talking over it. The clip's bytes are fetched through the same
+ * authenticated file route as image thumbnails, but only on first play — a
+ * note nobody opens costs no request, and a replay never refetches.
+ */
+@Composable
+private fun VoiceNoteAttachmentView(
+    threadId: String,
+    message: Message,
+    note: DisplayedMessageAttachment,
+) {
+    val foreground = if (message.role == Message.Role.USER) BubbleColor.mineText else MaterialTheme.colorScheme.onSurface
+    val session = LocalCompanion.current.session
+    val player = LocalCompanion.current.voiceNotes
+    val scope = rememberCoroutineScope()
+    val key = remember(message.id, note.path) { message.id + ":" + note.path }
+    var clip by remember(message.id, note.path) { mutableStateOf<VoiceNoteClipState>(VoiceNoteClipState.NotLoaded) }
+    // The scrub position while the slider is held; null when it tracks playback.
+    var scrub by remember(key) { mutableStateOf<Float?>(null) }
+
+    fun startPlayback(data: ByteArray) {
+        if (player.play(key, data) != null) clip = VoiceNoteClipState.Failed
+    }
+
+    fun loadAndPlay() {
+        clip = VoiceNoteClipState.Loading
+        scope.launch {
+            val downloaded = session.downloadFile(
+                threadId,
+                message.id,
+                note.path,
+                reportError = false,
+                cacheResult = true,
+            )
+            if (downloaded == null) {
+                clip = VoiceNoteClipState.Failed
+            } else {
+                clip = VoiceNoteClipState.Ready(downloaded.data)
+                startPlayback(downloaded.data)
+            }
+        }
+    }
+
+    val active = player.playback.collectAsState().value?.takeIf { it.key == key }
+    val playing = active?.playing == true
+
+    // Late engine failures park the clip; the bubble's retry row is its UI.
+    LaunchedEffect(key) {
+        player.playbackErrors.collectLatest {
+            if (it.key == key) clip = VoiceNoteClipState.Failed
+        }
+    }
+    // Pull the engine's position while it plays; the clock reads it back.
+    LaunchedEffect(key, playing) {
+        while (playing) {
+            player.refresh()
+            delay(200)
+        }
+    }
+
+    if (clip is VoiceNoteClipState.Failed) {
+        AttachmentLoadFailure(
+            label = "Voice note unavailable",
+            foreground = foreground,
+            onRetry = { clip = VoiceNoteClipState.NotLoaded },
+        )
+        return
+    }
+
+    // The wire's estimate until the engine loads metadata, then the real length.
+    val durationMs = active?.durationMs ?: note.durationMs?.toLong()?.takeIf { it > 0 }
+    val durationSeconds = durationMs?.let { it / 1000f } ?: 0f
+    val positionMs = scrub?.toLong() ?: (active?.positionMs ?: 0L)
+
+    Row(
+        modifier = Modifier
+            .widthIn(max = 360.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(foreground.copy(alpha = 0.10f))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary)
+                .clickable(role = Role.Button) {
+                    when {
+                        playing -> player.pause()
+                        clip is VoiceNoteClipState.Loading -> Unit
+                        active != null && player.resumable(key) ->
+                            if (player.resume() != null) clip = VoiceNoteClipState.Failed
+                        clip is VoiceNoteClipState.Ready ->
+                            startPlayback((clip as VoiceNoteClipState.Ready).data)
+                        else -> loadAndPlay()
+                    }
+                }
+                .semantics {
+                    contentDescription = if (playing) "Pause voice note" else "Play voice note"
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            when {
+                clip is VoiceNoteClipState.Loading && active == null ->
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White,
+                    )
+                playing -> VoiceNotePauseGlyph(Color.White)
+                else -> Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+        Slider(
+            // The slider works in seconds; without an explicit range Compose clamps
+            // it to 0f..1f and scrubs can only land inside the first second.
+            value = if (durationSeconds > 0f) (positionMs / 1000f).coerceIn(0f, durationSeconds) else 0f,
+            valueRange = if (durationSeconds > 0f) 0f..durationSeconds else 0f..1f,
+            onValueChange = { scrub = it * 1000f },
+            onValueChangeFinished = {
+                val target = scrub
+                scrub = null
+                if (target != null && active != null) player.seek(key, target.toLong())
+            },
+            // Like the desktop range input: no scrubbing until the length is known.
+            enabled = active != null && durationMs != null,
+            modifier = Modifier
+                .weight(1f)
+                .semantics { contentDescription = "Seek voice note" },
+        )
+        Text(
+            voiceNoteClock(positionMs) + " / " + (durationMs?.let(::voiceNoteClock) ?: "--:--"),
+            fontSize = 11.sp,
+            color = foreground.copy(alpha = 0.80f),
+        )
+    }
+}
+
+/** The pause glyph the core icon set does not carry, drawn at the button's scale. */
+@Composable
+private fun VoiceNotePauseGlyph(color: Color) {
+    Canvas(modifier = Modifier.size(14.dp)) {
+        val bar = size.width / 5f
+        val gap = size.width / 5f
+        drawRoundRect(
+            color = color,
+            topLeft = Offset.Zero,
+            size = Size(bar, size.height),
+            cornerRadius = CornerRadius(bar / 2f),
+        )
+        drawRoundRect(
+            color = color,
+            topLeft = Offset(bar + gap, 0f),
+            size = Size(bar, size.height),
+            cornerRadius = CornerRadius(bar / 2f),
+        )
     }
 }
 

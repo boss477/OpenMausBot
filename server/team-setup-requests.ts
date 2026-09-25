@@ -3,6 +3,7 @@ import { z } from "zod";
 import { newId, type ModelSelection } from "./contracts.ts";
 import { fitsOnOneLine, parseBotProfilePatch } from "./bot-profile.ts";
 import { profileSnapshot } from "./profile-revision.ts";
+import { validateBotCwd } from "./bot-cwd.ts";
 import { redactSecretsInText } from "./redact.ts";
 import type { BotRecord, OptionCardData } from "./store.ts";
 import type { TeamSetupFields, TeamSetupOperation, TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
@@ -12,8 +13,9 @@ const teamName = z.string().trim().min(1).max(60).refine(fitsOnOneLine).refine((
 const fieldsSchema = z.object({
   chiefOfStaff: z.boolean().optional(),
   name: z.string().optional(), title: z.string().optional(), description: z.string().optional(), soul: z.string().optional(),
+  cwd: z.string().optional(),
   section: z.string().trim().max(60).refine(fitsOnOneLine).refine((value) => redactSecretsInText(value) === value, "Team names cannot contain credentials").optional(),
-  modelSelection: z.object({ instanceId: z.string().trim().min(1), model: z.string().trim().min(1), effort: z.string().optional() }).strict().optional(),
+  modelSelection: z.object({ instanceId: z.string().trim().min(1), model: z.string().trim().min(1), effort: z.string().optional(), variant: z.string().optional() }).strict().optional(),
 }).strict();
 const planSchema = z.object({
   reason: z.string().trim().min(1).max(500),
@@ -82,13 +84,22 @@ export class TeamSetupRequestService {
   }
 
   private fields(input: z.infer<typeof fieldsSchema>, current?: BotRecord): TeamSetupFields {
-    const { section: targetSection, modelSelection, chiefOfStaff, ...profile } = input;
+    const { section: targetSection, modelSelection, chiefOfStaff, cwd: rawCwd, ...profile } = input;
     const safe = Object.fromEntries(Object.entries(profile).map(([key, value]) => [key, redactSecretsInText(value!)]));
     const parsed = parseBotProfilePatch(safe, true);
     if (!parsed.ok) throw new TeamSetupError(parsed.error);
     const result: TeamSetupFields = { ...parsed.patch };
     if (targetSection !== undefined) result.section = targetSection;
     if (chiefOfStaff !== undefined) result.chiefOfStaff = chiefOfStaff;
+    if (rawCwd !== undefined) {
+      // Create-only, and the exact check the profile path runs: absolute,
+      // exists, is a folder. An existing bot's folder keeps going through
+      // propose_profile, which re-checks the folder at confirm time.
+      if (current) throw new TeamSetupError("A working folder can only be chosen when creating a bot; propose_profile changes it later");
+      const checked = validateBotCwd(rawCwd);
+      if (!checked.ok) throw new TeamSetupError(checked.error);
+      result.cwd = checked.cwd ?? "";
+    }
     if (modelSelection) {
       const selection = modelSelection as ModelSelection;
       const error = this.options.validateModel(selection, current);
@@ -218,10 +229,19 @@ export class TeamSetupRequestService {
           continue;
         }
         const before = current ? (key === "section" ? current.section || "General" : current[key as keyof BotRecord]) : undefined;
-        lines.push(`${key === "modelSelection" ? "Default engine/model" : key}: ${current ? `${JSON.stringify(before ?? "")} → ` : ""}${key === "section" ? JSON.stringify(value || "General") : JSON.stringify(value)}`);
+        const label = key === "modelSelection" ? "Default engine/model" : key === "cwd" ? "Working folder" : key;
+        lines.push(`${label}: ${current ? `${JSON.stringify(before ?? "")} → ` : ""}${key === "section" ? JSON.stringify(value || "General") : JSON.stringify(value)}`);
       }
     }
-    if (!request.deletion) lines.push("\nDefault models apply to groups and new threads. Every existing thread keeps its current model and permissions.", "New bots start in Ask with connected apps disabled. Existing execution permissions are unchanged.");
+    if (!request.deletion) {
+      lines.push("\nDefault models apply to groups and new threads. Every existing thread keeps its current model and permissions.");
+      // Informed consent: creation locks the new bot down, and the owner
+      // signs off on that whole state, not just the two facts named before.
+      if (request.operations.some((operation) => operation.action === "create")) {
+        lines.push("New bots stay owner-owned after creation: connected apps off, approvals at Ask, a private workspace by default, avatar untouched.");
+      }
+      lines.push("Existing execution permissions are unchanged.");
+    }
     lines.push(immediate ? "Full Access applies this request in the current turn without another confirmation." : "After this decision the Chief continues once with the result.");
     const title = request.deletion ? `Delete @${request.deletion.name}?` : `Apply setup for ${request.operations.length} ${request.operations.length === 1 ? "bot" : "bots"}?`;
     const detail = lines.join("\n");

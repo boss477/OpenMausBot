@@ -838,6 +838,8 @@ describe("with no organization", () => {
     const library = app.open();
     expect(library.list()).toEqual({ organization: null, packages: [] });
     expect(library.offeredSkills()).toEqual({ organization: null, skills: [] });
+    // New bot's presets see no organization installs.
+    expect(library.installStatuses()).toEqual(new Map());
     expect(library.add(TEAM_ID, app.importDeps)).toMatchObject({ ok: false, status: 404 });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(app.posted).toEqual([]);
@@ -864,8 +866,16 @@ describe("presets from the shelf", () => {
     const made = app.store.createBot({ name: "Sky" });
     presets.applyPresetToBot(made.id, app.importDeps.presets.resolve(row!.id)!, app.importDeps);
     expect(app.store.bot(made.id)!.installedPackage).toMatchObject({ source: "org", installId, presetKey: "support" });
+    // Its skill carries the install's stamp for automatic updates (contract
+    // §3.2): the release's SKILL.md hash and the written one's, as a preset's.
+    const released = team.document.package.skills.entries.find((skill: { name: string }) => skill.name === "objection-handling").instructions;
+    expect(app.skills.skillPackageStamps(made.id)).toEqual([{ name: "objection-handling", enabled: true, stamp: {
+      installId, key: "objection-handling", release: "1.3.0", r: app.parts.partHash(released),
+      w: app.parts.partHash(app.skills.readSkillFile(made.id, "objection-handling")), via: "preset",
+    } }]);
 
-    // The person deletes the team; the bot they made from its preset stays.
+    // The person deletes the team; the bot they made from its preset stays,
+    // and neither it nor its stamped skill keeps the team "installed".
     for (const id of app.store.groups.map((group) => group.id)) app.store.deleteGroup(id);
     for (const bot of added.value.result.bots) app.store.deleteBot(bot.id);
     await new Promise((resolve) => setTimeout(resolve, 400));
@@ -881,6 +891,86 @@ describe("presets from the shelf", () => {
     expect(app.importDeps.presets.list()).toEqual([expect.objectContaining({ id: row!.id, installId, key: "support" })]);
     expect(app.readState().installs[installId]).toMatchObject({ status: "installed", presets: { support: { presetId: row!.id } } });
     expect(library.add(TEAM_ID, app.importDeps)).toMatchObject({ ok: true, status: 200, value: { alreadyAdded: true } });
+    // The preset-made bot keeps its skill, switched on and stamped.
+    expect(app.skills.skillPackageStamps(made.id)).toEqual([expect.objectContaining({ name: "objection-handling", enabled: true })]);
+  });
+
+  it("never adopts an install from a preset-made bot's stamped skill: a lost index comes back at the release that was added", async () => {
+    const app = await installation();
+    const presets = await import("./presets.ts");
+    let library = app.open();
+    const skills = release("library-only.v2.json");
+    app.writeBlob(skills.bytes);
+    library.applyRelay(relay(catalog([entry(LIBRARY_ID, skills)])));
+    await library.settled();
+    const installId = (library.add(LIBRARY_ID, app.importDeps) as any).value.result.installId;
+    const indexed = app.readState().installs[installId];
+    const [row] = app.importDeps.presets.list();
+    const made = app.store.createBot({ name: "Sky" });
+    presets.applyPresetToBot(made.id, app.importDeps.presets.resolve(row!.id)!, app.importDeps);
+    expect(app.skills.skillPackageStamps(made.id)).toEqual([expect.objectContaining({ stamp: expect.objectContaining({ installId, release: "2.0.1", via: "preset" }) })]);
+
+    // The index is lost while the catalog has moved on to 2.1.0. The preset
+    // rows bring the install back as it was added; the bot's stamped skill is
+    // the person's copy and does not stand in for it at the newer release.
+    library.dispose();
+    unlinkSync(app.statePath);
+    const newer = release("library-only.v2.json", (document) => { document.package.release = "2.1.0"; });
+    app.writeBlob(newer.bytes);
+    library = app.open();
+    library.applyRelay(relay(catalog([entry(LIBRARY_ID, newer)])));
+    await library.settled();
+    expect(app.readState().installs[installId]).toEqual({ ...indexed, addedAt: expect.any(Number), updatedAt: expect.any(Number) });
+    expect(library.lastReport()!.packages).toEqual([expect.objectContaining({ packageId: LIBRARY_ID, release: "2.0.1", sha256: skills.sha256, state: "installed" })]);
+  });
+
+  it("New bot follows the library's own install statuses, saved or not, and never its file", async () => {
+    const app = await installation();
+    const { createBotPresetRoutes } = await import("./routes/bot-presets.ts");
+    const library = app.open();
+    // GET /api/bot-presets, wired as server/index.ts wires it.
+    const route = createBotPresetRoutes({ presets: app.importDeps.presets, orgStatuses: () => library.installStatuses() });
+    const offered = async () => {
+      let answer: { status: number; body: any } | undefined;
+      const json = (_res: unknown, status: number, body: unknown) => { answer = { status, body }; };
+      await route({ path: "/api/bot-presets", method: "GET", res: {}, json } as any);
+      expect(answer!.status).toBe(200);
+      return answer!.body.presets.map((preset: { source: string; key: string }) => `${preset.source}:${preset.key}`);
+    };
+    const team = release("full-team.v2.json");
+    app.writeBlob(team.bytes);
+    library.applyRelay(relay(catalog([entry(TEAM_ID, team)])));
+    await library.settled();
+    const added = library.add(TEAM_ID, app.importDeps) as any;
+    const installId = added.value.result.installId;
+    expect(library.installStatuses()).toEqual(new Map([[installId, "installed"]]));
+    expect(await offered()).toEqual(["org:support"]);
+    const installedOnDisk = readFileSync(app.statePath, "utf8");
+
+    // The team is deleted. The rebuild marks the install removed and New bot
+    // stops offering its preset, even while the file on disk still says
+    // "installed" (a rebuild whose write has not landed).
+    for (const id of app.store.groups.map((group) => group.id)) app.store.deleteGroup(id);
+    for (const bot of added.value.result.bots) app.store.deleteBot(bot.id);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await library.settled();
+    const removedOnDisk = readFileSync(app.statePath, "utf8");
+    writeFileSync(app.statePath, installedOnDisk);
+    expect(library.installStatuses()).toEqual(new Map([[installId, "removed"]]));
+    expect(await offered()).toEqual([]);
+
+    // Added again: its preset is offered at once, although the file still
+    // says "removed" (an Add whose index write is pending).
+    expect(library.add(TEAM_ID, app.importDeps)).toMatchObject({ ok: true, status: 201 });
+    writeFileSync(app.statePath, removedOnDisk);
+    expect(await offered()).toEqual(["org:support"]);
+    unlinkSync(app.statePath);
+    expect(await offered()).toEqual(["org:support"]);
+
+    // Signing out hides the shelf and keeps what was added, statuses too.
+    library.applyRelay(null);
+    expect(library.installStatuses()).toEqual(new Map([[installId, "installed"]]));
+    expect(await offered()).toEqual(["org:support"]);
   });
 
   it("adopts a presets package from its preset rows after its index is lost, and a withdrawal still reaches bots made from it", async () => {
@@ -925,7 +1015,8 @@ describe("presets from the shelf", () => {
     library.applyRelay(relay(catalog([entry(LIBRARY_ID, skills, { release: null, withdrawnReleases: [{ version: "2.0.1", sha256: skills.sha256 }] })])));
     await library.settled();
     expect(app.readState().installs[installId].status).toBe("withdrawn");
-    expect(presets.listBotPresets(app.importDeps.presets, presets.readOrgInstallStatuses(app.statePath))).toEqual([]);
+    expect(library.installStatuses().get(installId)).toBe("withdrawn");
+    expect(presets.listBotPresets(app.importDeps.presets, library.installStatuses())).toEqual([]);
     expect(app.skills.listSkills(made.id)).toEqual([expect.objectContaining({ name: "objection-handling", enabled: false })]);
     expect(app.skills.listSkills(mine.id)).toEqual([expect.objectContaining({ name: "objection-handling", enabled: true, source: "https://example.com/mine" })]);
     app.skills.setSkillEnabled(made.id, "objection-handling", true);

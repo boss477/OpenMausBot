@@ -47,6 +47,10 @@ async function addSupervisingChief(f: any, section = "") {
 it.each(["", "Leadership"])("lists and coordinates with a supervising Chief and same-section peer in the same room (Chief section %j)", section => withRooms(async f => {
   const chief = await addSupervisingChief(f, section);
   f.plan[f.sender.id].steps = [{ arguments: { bot_ids: [chief.id, f.target.id], request_key: "same-room", message: "Review the work here" } }];
+  // The fresh coordination brief carries the recipient's own live roster:
+  // dispatch-time data must ride the user turn, fenced with its own markers
+  // so it can never blend into the assignment text around it.
+  f.plan[f.target.id] = { reply: "Built CSV", expectContextIncludes: ["[LIVE TEAMMATES]", `[id: ${f.sender.id}]`] };
   await f.start(); expect((await f.wait()).status).toBe("settled");
   const discovery = JSON.parse(f.provider().find((turn: any) => turn.botId === f.sender.id).evidence[1].result.content[0].text);
   expect(discovery.rooms.find((room: any) => room.id === f.source.id).members.map((bot: any) => bot.id)).toEqual(expect.arrayContaining([chief.id, f.target.id]));

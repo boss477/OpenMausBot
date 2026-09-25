@@ -13,7 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { BotVisibility, CloudBackend, EffortLevel, InstalledPackageMetadata, ServerFrame, GroupThreadUsage, SteerQueueReason } from "../../shared/wire";
+import type { BotVisibility, CloudBackend, ConnectorToolGrant, EffortLevel, InstalledPackageMetadata, ServerFrame, GroupThreadUsage, SteerQueueReason } from "../../shared/wire";
 import type { TurnDigest } from "../../shared/digest";
 import type { ModelVariantOption, RuntimeEvent } from "../../shared/runtime-events";
 import type { MausColor, MausMotion } from "@/lib/mascot";
@@ -418,6 +418,10 @@ export interface Bot {
   /** Whether this bot may use the workspace's connected apps. Unset means
    * allowed for existing bots; imported bots start with this disabled. */
   composio?: boolean;
+  /** Which connected-app tools this bot may call, by service slug. Absent
+   * defers to the composio boolean (unset/true = every tool, false = none);
+   * an explicit {} grants no tools. Edited from bot settings → Access. */
+  connectorTools?: Record<string, ConnectorToolGrant>;
   /** Whether this bot gets the app's built-in browser (Browser tab). On unless switched off. */
   browser?: boolean;
   /** Which app-wide MCP servers (Plugins → MCP servers) this bot mounts, by
@@ -2024,13 +2028,16 @@ export function reducer(state: AppState, action: Action): AppState {
         confirmFullAccess: _fullConfirmation,
         applyToAllThreads: _allThreads,
         computer,
+        connectorTools,
         ...rest
       } = action.patch;
-      const botPatch = computer === null
-        ? { ...rest, computer: undefined }
-        : computer === undefined
-          ? rest
-          : { ...rest, computer };
+      const botPatch: Partial<Bot> = { ...rest };
+      if (computer === null) botPatch.computer = undefined;
+      else if (computer !== undefined) botPatch.computer = computer;
+      // A dropped grants record returns the bot to the absent legacy field,
+      // exactly like a cleared computer destination.
+      if (connectorTools === null) botPatch.connectorTools = undefined;
+      else if (connectorTools !== undefined) botPatch.connectorTools = connectorTools;
       return updateBot(next, action.botId, (b) => ({ ...b, ...botPatch }));
     }
     case "threadActive": {

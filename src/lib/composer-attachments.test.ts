@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   appendPastedText,
+  attachmentAudioUrl,
   attachmentBasename,
   attachmentImageUrl,
   clipboardHasImages,
@@ -347,6 +348,16 @@ describe("attachmentBasename", () => {
     expect(attachmentImageUrl("https://attacker.example/tracker.png?cookie=1")).toBeNull();
     expect(attachmentImageUrl("/a/b/payload.svg")).toBeNull();
     expect(attachmentImageUrl("/a/b/not%2Fan-image.png")).toBeNull();
+  });
+
+  it("turns only parked mp3 names into same-origin audio sources", () => {
+    expect(attachmentAudioUrl("/a/b/123e4567-e89b-12d3-a456-426614174000.mp3")).toBe(
+      "/api/attachments/123e4567-e89b-12d3-a456-426614174000.mp3",
+    );
+    expect(attachmentAudioUrl("C:\\a\\b\\note.mp3")).toBe("/api/attachments/note.mp3");
+    expect(attachmentAudioUrl("/a/b/note.wav")).toBeNull();
+    expect(attachmentAudioUrl("/a/b/notes.mp3.txt")).toBeNull();
+    expect(attachmentAudioUrl("https://attacker.example/clip.mp3?x=1")).toBeNull();
   });
 });
 

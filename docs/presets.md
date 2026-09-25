@@ -35,17 +35,25 @@ still says only what a file may.
   skill in a shared file. Switch them on in the bot's Skills settings after
   reading them.
 - **From your organization:** the skills are added **switched on**, because
-  your organization's Admin published them.
+  your organization's Admin published them. Each also carries the install's
+  skill stamp (contract §3.2: the install, the skill's name, the release, and
+  the `SKILL.md` hashes as released and as written), marked `via: "preset"`,
+  so a later automatic update can tell your own edits from the publisher's
+  changes. The bot is still yours, not part of the package: it never keeps
+  the package added, so a team you deleted can be added again.
 
 The New bot dialog says which applies before you create the bot. A preset's
 skills and starter notes win over your New bot defaults' own skill or note of
 the same name. The bot records where it came from (`installedPackage` with
 `presetKey`).
 
-A preset from an organization release that was withdrawn, or from a package
-your organization removed, is no longer offered, and a bot already made from
-a withdrawn one has that release's skills switched off (once; switching them
-back on is yours). Adding the same organization package again, for example a
+A preset from an organization release that was withdrawn, or from a team you
+deleted, is no longer offered, and a bot already made from a withdrawn one
+has that release's skills switched off (once; switching them back on is
+yours). Which presets are offered follows the organization library's own
+state (`OrgLibrary.installStatuses()` in `server/org-library.ts`), not a
+separate read of `state.json`, so New bot and the shelf never disagree. With
+no organization there are no installs and nothing is hidden. Adding the same organization package again, for example a
 team you deleted, refreshes its presets in place rather than adding copies. Organization presets are
 managed in Admin; an imported preset can be removed with **Remove from New
 bot** under the Starting role list (no confirmation step).

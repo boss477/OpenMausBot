@@ -750,6 +750,14 @@ export function attachmentImageUrl(path: string): string | null {
   return `/api/attachments/${encodeURIComponent(name)}`;
 }
 
+/** Voice notes park as bare generated .mp3 filenames; anything else stays
+ * out of an <audio> src rather than 404ing on a private path. */
+export function attachmentAudioUrl(path: string): string | null {
+  const name = attachmentBasename(path);
+  if (!/^[A-Za-z0-9-]+\.mp3$/.test(name)) return null;
+  return `/api/attachments/${encodeURIComponent(name)}`;
+}
+
 /** One intake path for files arriving by drop OR by the composer's attach
  * button, so a picked file and a dropped one can never behave differently.
  * Uploaders are injected for deterministic tests: callers own the network,

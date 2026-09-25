@@ -169,6 +169,14 @@ describe("saveAudio", () => {
     expect(readdirSync(ATTACHMENTS_DIR)).toEqual([saved.path.split(/[\\/]/).pop()!]);
   });
 
+  it("serves a saved note back through readAttachment as audio/mpeg", () => {
+    const saved = saveAudio(Buffer.from("mp3-note!"), "audio/mpeg");
+    const name = saved.path.split(/[\\/]/).pop()!;
+    const back = readAttachment(name);
+    expect(back?.bytes.toString()).toBe("mp3-note!");
+    expect(back?.mime).toBe("audio/mpeg");
+  });
+
   it("normalizes mime parameters and casing", () => {
     const saved = saveAudio(Buffer.from("x"), "Audio/MPEG; charset=binary");
     expect(saved.mime).toBe("audio/mpeg");
@@ -441,6 +449,7 @@ describe("readAttachment name lock", () => {
     expect(readAttachment("a/b.png")).toBeNull();
     expect(readAttachment("no-extension")).toBeNull();
     expect(readAttachment("uuid.jpeg")).toBeNull(); // saved as .jpg
+    expect(readAttachment("note.wav")).toBeNull(); // only .mp3 audio is written
   });
 });
 

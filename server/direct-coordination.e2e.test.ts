@@ -54,7 +54,9 @@ it.each([false, true])("starts independent work immediately and frees the Chief 
   const childGate = join(f.session.info.dataDir, "child-ready");
   f.plan[f.chief.id].gateFile = sourceGate;
   f.plan[f.chief.id].fail = fail;
-  f.plan[f.lead.id] = { gateFile: childGate, reply: "CSV export implemented and checked" };
+  // The direct lane carries the same dispatch-time live roster the room lane
+  // does: fresh hand-offs name the teammates the recipient can reach now.
+  f.plan[f.lead.id] = { gateFile: childGate, reply: "CSV export implemented and checked", expectContextIncludes: ["[LIVE TEAMMATES]", `[id: ${f.specialist.id}]`] };
   await f.start();
   await expect.poll(() => f.nodes().find((n: any) => n.botId === f.lead.id)?.status, { timeout: 15_000 }).toBe("running");
   expect(f.nodes().find((n: any) => n.botId === f.chief.id).status).toBe("source");

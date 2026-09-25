@@ -1557,6 +1557,9 @@ struct TextBubble: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(MausPalette.color(speaker.color))
                 }
+                ForEach(message.voiceNotes) { note in
+                    VoiceNoteBubble(note: note, tint: MausPalette.color(chat.color))
+                }
                 ForEach(message.generatedImages, id: \.path) { attachment in
                     TranscriptAttachmentView(
                         attachment: attachment, threadId: chat.threadId,

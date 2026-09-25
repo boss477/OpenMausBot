@@ -34,9 +34,10 @@ the standing instructions, then checks:
   saved defaults applied too, the preset's skill wins over the defaults';
 - an organization preset (written into `org-library/presets.json` as the
   organization library stores one) is listed first under its publisher and
-  its skill is added switched on under the organization's own source; once
-  `org-library/state.json` marks the install withdrawn, it is neither listed
-  nor usable;
+  its skill is added switched on under the organization's own source;
+  writing `org-library/state.json` under the running app does not change
+  what New bot offers (the organization library's own state decides; the
+  second test withdraws a release through the library);
 - an unknown or malformed preset, and a file with skills but no presets, are
   refused without creating anything; an imported preset can be removed, an
   organization's cannot (`409`).
@@ -65,7 +66,9 @@ pnpm exec vitest run server/presets.test.ts server/routes/bot-presets.test.ts se
   presets come first and withdrawn or removed installs are hidden, a
   hand-edited row cannot add an approval level or model and a row with a
   daily log is refused; bots made from file and organization presets get
-  their skills off and on respectively; the defaults preset keeps only the
+  their skills off and on respectively, and only the organization preset's
+  skill carries the install's stamp (release, `r` and `w` hashes of the
+  stored `SKILL.md`, `via: "preset"`); the defaults preset keeps only the
   allowlist; a team file's preset never pushes out a team skill of the same
   name; the preset file round-trips.
 - `server/routes/bot-presets.test.ts` drives the two routes through the
@@ -145,3 +148,43 @@ Not production qualification: no real organization, Admin upload or
 organization library was involved. Organization presets were written into
 `org-library/presets.json` the way the organization library stores them,
 and withdrawal was simulated by writing `org-library/state.json`.
+
+## 2026-09-24: organization library seams (follow-up to PR #1773)
+
+Two seams an integration check against the contract found. New bot's
+install statuses now come from `OrgLibrary.installStatuses()` (the library's
+state in memory) instead of a separate read of `org-library/state.json`, and
+an organization preset's skills get the skill-state stamp (§3.2) marked
+`via: "preset"`, which the library never counts toward the install.
+
+Added or changed: `server/org-library.test.ts` drives `GET /api/bot-presets`
+through the route module wired to `installStatuses()` while the file on disk
+disagrees both ways (a rebuild not yet written says "removed", an Add not yet
+written says "installed", the file deleted, then signed out); the preset-made
+bot's stamp is checked against the release's `SKILL.md` and the written one,
+and the team is still marked removed and added again (`201`) around it; a
+presets package whose index is lost while the catalog moved on to a newer
+release comes back at the release that was added, not from the preset-made
+bot's stamped skill; the withdrawal test now reads the library's statuses. `server/presets.test.ts`
+checks the stamp against the skill stored in `presets.json`, and that a file
+preset's skill has none. `server/presets.e2e.test.ts` writes a withdrawn
+`state.json` under the running app and sees New bot unchanged.
+
+Run on macOS (arm64) against disposable fixtures only: `pnpm typecheck`,
+`pnpm lint`, `pnpm i18n:check`, `server/presets.test.ts`,
+`server/org-library.test.ts`, `server/org-library.e2e.test.ts`,
+`server/routes/bot-presets.test.ts`, `server/package-import.test.ts`,
+`server/package-export.test.ts`, `server/presets.e2e.test.ts`,
+`server/team-share.e2e.test.ts`, `scripts/testing/verification-docs.test.ts`
+and the presets headless-renderer recipe (`OMB_UI_E2E=1`).
+Mutation-checked (each broken, the named test seen failing, restored):
+`installStatuses()` reading the file instead of memory; no stamp, a wrong
+`w` hash, and no `via` marker; preset-made bots' stamps counted toward the
+install (a presets package whose index was lost comes back at the catalog's
+newer release instead of the one added); withdrawal reaching preset skills by neither stamp nor
+source (either one alone still switches them off, by design); `server/index.ts`
+wired to an empty status map (the HTTP withdrawal test fails) or back to the
+file (the HTTP file-write check fails).
+
+Not production qualification: no real organization, Admin upload or
+organization library was involved.

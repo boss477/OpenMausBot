@@ -1268,4 +1268,6 @@ data class MessageImageAttachment(
     val kind: String,
     val path: String? = null,
     val mime: String? = null,
+    /** `kind == "audio"`: the server's duration estimate, used until the player loads metadata. */
+    val durationMs: Double? = null,
 )

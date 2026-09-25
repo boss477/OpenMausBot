@@ -156,7 +156,10 @@ let fakeDockerFixture: string;
 let fakeVpsFixture: string;
 let fakeDockerLog: string;
 let stderr = "";
-let connectorAccounts: Array<{ id: string; alias: string; status: string; toolkit: { slug: string } }> = [];
+let connectorAccounts: Array<{ id: string; alias?: string; status: string; toolkit: { slug: string } }> = [];
+// What the stubbed marketplace catalog serves for project keys; empty means
+// the walk found nothing and composio falls back to its curated list.
+let connectorCatalogToolkits: Array<{ slug: string; name: string }> = [];
 const connectorLinkRequests: Array<{ toolkit: string; alias?: string }> = [];
 /** Every frame the harness relayed to the stubbed Composio MCP endpoint. */
 const connectorRelayCalls: Array<{ transportSessionId: string; body: any }> = [];
@@ -753,7 +756,9 @@ beforeAll(async () => {
     }
     if (req.url?.startsWith("/api/v3.1/connected_accounts") || req.url?.startsWith("/api/v3/toolkits")) {
       res.writeHead(200, { "content-type": "application/json" });
-      return res.end(JSON.stringify({ items: req.url.startsWith("/api/v3.1/connected_accounts") ? connectorAccounts : [] }));
+      return res.end(JSON.stringify({
+        items: req.url.startsWith("/api/v3.1/connected_accounts") ? connectorAccounts : connectorCatalogToolkits,
+      }));
     }
     if (req.url?.startsWith("/api/v3.1/tool_router/session")) {
       if (req.headers["x-api-key"] !== "ak_good") {
@@ -787,10 +792,48 @@ beforeAll(async () => {
         transportSessionId: typeof req.headers["mcp-session-id"] === "string" ? req.headers["mcp-session-id"] : "",
         body,
       });
+      const requestId = body && typeof body === "object" && "id" in body ? (body as { id: unknown }).id : null;
+      // The grant editor's inventory walks the same MCP handshake a mounted
+      // bot performs: initialize, then tools/list. tools/call keeps the
+      // relay-ok answer the verdict tests assert on.
+      if (body && typeof body === "object" && (body as { method?: unknown }).method === "initialize") {
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "mcp-session-grants" });
+        return res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          result: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            serverInfo: { name: "composio-stub", version: "1" },
+          },
+        }));
+      }
+      if (body && typeof body === "object" && (body as { method?: unknown }).method === "tools/list") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          result: {
+            tools: [
+              { name: "GMAIL_SEND_EMAIL", description: "Send  an email" },
+              // A repeat listing must not duplicate the picker entry.
+              { name: "GMAIL_SEND_EMAIL", description: "duplicate listing" },
+              { name: "GMAIL_FETCH_EMAILS", description: "Fetch emails" },
+              { name: "SLACK_POST_MESSAGE", description: "a".repeat(300) },
+              // Platform meta-tools, connection flows, non-pattern names and
+              // names without a service prefix are never per-tool grants.
+              { name: "COMPOSIO_SEARCH_TOOLS", description: "meta" },
+              { name: "GMAIL_MANAGE_CONNECTIONS", description: "flow" },
+              { name: "gmail_send_email", description: "bad case" },
+              { name: "PLATFORM", description: "no service" },
+            ],
+          },
+        }));
+      }
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({
         jsonrpc: "2.0",
-        id: body && typeof body === "object" && "id" in body ? (body as { id: unknown }).id : null,
+        id: requestId,
         result: { content: [{ type: "text", text: "relay-ok" }] },
       }));
     }
@@ -2199,6 +2242,37 @@ describe("harness HTTP API", () => {
         await api("DELETE", `/api/bots/${bot.id}`);
       }
       if (!deleted) await api("DELETE", `/api/bots/${chief.id}`);
+    }
+  });
+
+  it("lands a created operator in a requested working folder or refuses it with the profile copy", async () => {
+    const chief = (await api("POST", "/api/bots")).body.bot;
+    let createdId: string | undefined;
+    try {
+      expect((await api("PATCH", `/api/bots/${chief.id}`, { chiefOfStaff: true })).status).toBe(200);
+      const token = await mintTestCapability(BASE, chief.id, chief.threadId);
+      const create = async (name: string, cwd: unknown) => {
+        const response = await fetch(`${BASE}/api/internal/create-bot`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ fromBotId: chief.id, fromThreadId: chief.threadId, name, role: "Ops", instructions: "Work.", cwd }),
+        });
+        return { status: response.status, body: await response.json() as { id?: string; error?: string } };
+      };
+      const folder = mkdtempSync(join(tmpdir(), "omb-create-cwd-"));
+      const landed = await create(`Folder operator ${chief.id}`, folder);
+      expect(landed.status).toBe(201);
+      createdId = landed.body.id;
+      const state = (await api("GET", "/api/bots?messages=0")).body;
+      expect(state.bots.find((bot: { id?: string }) => bot.id === createdId)?.cwd).toBe(folder);
+      const relative = await create(`Relative operator ${chief.id}`, "relative/path");
+      expect(relative).toMatchObject({ status: 400, body: { error: "working folder must be an absolute path" } });
+      const missing = await create(`Missing operator ${chief.id}`, join(folder, "missing"));
+      expect(missing.status).toBe(400);
+      expect(missing.body.error).toBe(`that folder doesn't exist: ${join(folder, "missing")}`);
+    } finally {
+      if (createdId) await api("DELETE", `/api/bots/${createdId}`);
+      await api("DELETE", `/api/bots/${chief.id}`);
     }
   });
 
@@ -9264,6 +9338,62 @@ describe("harness HTTP API", () => {
     } finally {
       await api("DELETE", `/api/bots/${bot.id}`);
     }
+  });
+
+  it("validates connector grant patches against connected services and the catalog", async () => {
+    // Project mode: the stub serves gmail (session toolkits plus an active
+    // account), slack (active account) and a catalog of exactly those two.
+    expect((await api("PUT", "/api/config", { composio: { apiKey: "ak_good" } })).status).toBe(200);
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    connectorAccounts = [
+      { id: "ca_gmail", status: "ACTIVE", toolkit: { slug: "gmail" } },
+      { id: "ca_slack", status: "ACTIVE", toolkit: { slug: "slack" } },
+      { id: "ca_customcrm", status: "ACTIVE", toolkit: { slug: "customcrm" } },
+    ];
+    connectorCatalogToolkits = [
+      { slug: "gmail", name: "Gmail" },
+      { slug: "slack", name: "Slack" },
+    ];
+    const patch = (connectorTools: unknown) => api("PATCH", "/api/bots/" + bot.id, { connectorTools });
+    try {
+      expect((await patch({ gmail: { tools: ["GMAIL_SEND_EMAIL"] }, slack: { tools: "*" } })).status).toBe(200);
+      expect((await patch({ notion: { tools: ["NOTION_CREATE_PAGE"] } })).body.error).toMatch(/not connected: notion/);
+      expect((await patch({ gmail: { tools: ["SLACK_POST_MESSAGE"] } })).body.error).toMatch(
+        /another service: SLACK_POST_MESSAGE/,
+      );
+      // customcrm is connected but absent from the live catalog walk.
+      expect((await patch({ customcrm: { tools: ["CUSTOMCRM_LOG_CALL"] } })).body.error).toMatch(
+        /missing from the connected-apps catalog: customcrm/,
+      );
+      // An unreachable inventory never blocks the patch: with no project key
+      // and no managed broker the semantic checks step aside entirely.
+      expect((await api("PUT", "/api/config", { composio: { apiKey: "" } })).status).toBe(200);
+      expect((await patch({ linear: { tools: ["LINEAR_CREATE_TICKET"] } })).status).toBe(200);
+    } finally {
+      connectorAccounts = [];
+      connectorCatalogToolkits = [];
+      await api("PUT", "/api/config", { composio: { apiKey: "" } });
+      await api("DELETE", "/api/bots/" + bot.id);
+    }
+  });
+
+  it("serves the grant editor's tool inventory grouped by service", async () => {
+    // Broker mode: clear any project key an earlier test left behind so the
+    // inventory walks the same stubbed managed relay a bot without a project
+    // key mounts through.
+    expect((await api("PUT", "/api/config", { composio: { apiKey: "" } })).status).toBe(200);
+    const response = await api("GET", "/api/connectors/tools");
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      configured: true,
+      services: {
+        gmail: [
+          { name: "GMAIL_FETCH_EMAILS", description: "Fetch emails" },
+          { name: "GMAIL_SEND_EMAIL", description: "Send an email" },
+        ],
+        slack: [{ name: "SLACK_POST_MESSAGE", description: "a".repeat(240) }],
+      },
+    });
   });
 
   it.skipIf(process.platform === "win32")("stores the credentials file with owner-only permissions", () => {

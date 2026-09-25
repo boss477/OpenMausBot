@@ -1377,9 +1377,40 @@ public struct ServerEnvironment: Codable, Hashable, Sendable {
     public var version: String?
 }
 
-/// Keep future attachment kinds decodable; only image entries are displayed.
+/// Keep future attachment kinds decodable; image entries display inline and
+/// audio entries render as voice notes (Message.voiceNotes). Unknown kinds
+/// decode without breaking, so a newer computer never gaps the transcript.
 public struct MessageImageAttachment: Codable, Hashable, Sendable {
     public var kind: String
     public var path: String?
     public var mime: String?
+    /// The server's duration estimate for an audio attachment, in
+    /// milliseconds; shown until the player loads real metadata.
+    public var durationMs: Double?
+}
+
+/// One voice note in Message.attachments: the parked clip's bare generated
+/// filename plus the server's duration estimate. Mirrors the web bubble's
+/// VoiceNoteAttachment (PR #1801), the contract this rendering matches.
+public struct MessageVoiceNote: Hashable, Sendable, Identifiable {
+    public var path: String
+    public var mime: String?
+    public var durationMs: Double?
+
+    public var id: String { path }
+}
+
+extension Message {
+    /// Audio attachments that can render, in wire order: kind == "audio"
+    /// with a usable path, deduplicated the way generatedImages deduplicates
+    /// so a clip replayed by a late message patch renders once.
+    public var voiceNotes: [MessageVoiceNote] {
+        var seen = Set<String>()
+        return (attachments ?? []).compactMap { attachment in
+            guard attachment.kind == "audio", let path = attachment.path,
+                  !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  seen.insert(path).inserted else { return nil }
+            return MessageVoiceNote(path: path, mime: attachment.mime, durationMs: attachment.durationMs)
+        }
+    }
 }

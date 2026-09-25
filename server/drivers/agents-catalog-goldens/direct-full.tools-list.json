@@ -367,6 +367,11 @@
               "instanceId",
               "model"
             ]
+          },
+          "cwd": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Absolute path of the folder this specialist's tools read and write in (for example /Users/me/Projects/site). It must already exist. Leave it out for the specialist's private workspace."
           }
         },
         "required": [
@@ -459,6 +464,11 @@
                       "type": "string",
                       "description": "Standing instructions; required with name/title/modelSelection for every new bot."
                     },
+                    "cwd": {
+                      "type": "string",
+                      "maxLength": 1024,
+                      "description": "Create only: absolute path of the folder the new bot's tools read and write in. It must already exist. Leave it out for a private workspace."
+                    },
                     "section": {
                       "type": "string",
                       "maxLength": 60,
@@ -475,6 +485,9 @@
                           "type": "string"
                         },
                         "effort": {
+                          "type": "string"
+                        },
+                        "variant": {
                           "type": "string"
                         }
                       },

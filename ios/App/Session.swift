@@ -121,6 +121,17 @@ final class Session: ObservableObject {
     /// for the same attachment path.
     private var avatarFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
     private var avatarCacheGeneration = 0
+    /// Voice-note bytes for the transcript bubbles. Clips are short but a
+    /// busy thread can carry several; a small cost-bounded window keeps
+    /// replay from refetching without pinning the whole transcript.
+    private let voiceNoteCache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.countLimit = 32
+        cache.totalCostLimit = 32 * 1_024 * 1_024
+        return cache
+    }()
+    private var voiceNoteFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
+    private var voiceNoteCacheGeneration = 0
     /// Full image bytes are already fetched to draw a thumbnail. Keep a small,
     /// cost-bounded window so tapping that thumbnail opens immediately instead
     /// of downloading the same image twice.
@@ -198,6 +209,11 @@ final class Session: ObservableObject {
                 let config = URLSessionConfiguration.ephemeral
                 config.protocolClasses = [ImagePreviewProtocol.self]
                 client = CompanionClient(connection: preview, token: "image-fixture-token", session: URLSession(configuration: config))
+            }
+            if arguments.contains("-voice-preview") {
+                let config = URLSessionConfiguration.ephemeral
+                config.protocolClasses = [VoicePreviewProtocol.self]
+                client = CompanionClient(connection: preview, token: "voice-fixture-token", session: URLSession(configuration: config))
             }
             state.hydrate(fleet)
             if arguments.contains("-chat-focus-preview") {
@@ -1913,12 +1929,41 @@ final class Session: ObservableObject {
         for fetch in avatarFetches.values { fetch.task.cancel() }
         avatarFetches.removeAll()
         avatarCache.removeAllObjects()
+        voiceNoteCacheGeneration += 1
+        for fetch in voiceNoteFetches.values { fetch.task.cancel() }
+        voiceNoteFetches.removeAll()
+        voiceNoteCache.removeAllObjects()
     }
 
     func voiceOptions() async -> [Voice] {
         guard let client else { return [] }
         do { return try await client.voices() }
         catch { actionError = error.localizedDescription; return [] }
+    }
+
+    /// Cached voice-note bytes for the transcript bubble, shaped like
+    /// avatarData so replay and scroll-back never refetch the same clip.
+    func voiceNoteData(for note: MessageVoiceNote) async -> Data? {
+        guard let client else { return nil }
+        let key = note.path as NSString
+        if let cached = voiceNoteCache.object(forKey: key) { return cached as Data }
+        let generation = voiceNoteCacheGeneration
+        let fetch: (id: UUID, task: Task<Data?, Never>)
+        if let pending = voiceNoteFetches[note.path] {
+            fetch = pending
+        } else {
+            let pending = (
+                id: UUID(),
+                task: Task<Data?, Never> { try? await client.voiceNote(path: note.path) }
+            )
+            voiceNoteFetches[note.path] = pending
+            fetch = pending
+        }
+        let data = await fetch.task.value
+        if voiceNoteFetches[note.path]?.id == fetch.id { voiceNoteFetches.removeValue(forKey: note.path) }
+        guard !Task.isCancelled, generation == voiceNoteCacheGeneration, let data else { return nil }
+        voiceNoteCache.setObject(data as NSData, forKey: key, cost: data.count)
+        return data
     }
 
     /// Switch the workspace's voice engine. The fresh status comes back so

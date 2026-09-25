@@ -19,6 +19,7 @@ import {
   readSafeLogTail,
 } from "./diagnostics.mjs";
 import { migrateWorkspaceCredentials, workspaceCredentialEnv } from "./workspace-credentials.mjs";
+import { evictStartupCacheOnce } from "./startup-cache-eviction.mjs";
 import { activateExistingWindow, releaseSingleInstanceLock } from "./single-instance.mjs";
 import { pollServerIdentity } from "./server-boot-probe.mjs";
 import { createServerSupervisor } from "./server-supervisor.mjs";
@@ -2804,6 +2805,17 @@ setCuaStateListener((connection) => {
 });
 
 app.whenReady().then(async () => {
+  // Cached-before-the-fix attachment responses outlive `no-store`: entries
+  // stored under the old one-year immutable policy can replay to a second
+  // identity in this profile without the visibility gate re-running. The
+  // first launch of each new version empties the HTTP cache, before any
+  // window could serve one of those entries.
+  await evictStartupCacheOnce({
+    userData: app.getPath("userData"),
+    currentVersion: app.getVersion(),
+    clearCache: () => session.defaultSession.clearCache(),
+    log: slog,
+  });
   if (process.platform === "win32") {
     try {
       desktopTray = createSystemTray({

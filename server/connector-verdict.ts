@@ -60,6 +60,23 @@ export function serviceSlugFor(tool: string): string | null {
   return tool.slice(0, underscore).toLowerCase();
 }
 
+/** The service a Composio tool name belongs to when the caller knows the
+ * real service slugs. Slugs may contain underscores (bland_ai), which the
+ * plain first-segment split above cannot see — BLAND_AI_MAKE_CALL splits
+ * as "bland". When a known candidate matches the name's prefix, the
+ * longest candidate wins (bland_ai over bland), so an underscored service
+ * keeps its own tools; with no matching candidate the caller falls back
+ * to serviceSlugFor. */
+export function serviceSlugForCandidates(tool: string, candidates: readonly string[]): string | null {
+  let match: string | null = null;
+  for (const candidate of candidates) {
+    if (tool.startsWith(candidate.toUpperCase() + "_") && (match === null || candidate.length > match.length)) {
+      match = candidate;
+    }
+  }
+  return match;
+}
+
 /** Classify one relayed JSON-RPC frame. Anything that is not a tools/call,
  * or is a discovery/connection/platform meta-tool, passes through. */
 export function connectorCallFromFrame(payload: unknown): ConnectorCall {
@@ -126,9 +143,16 @@ function multiExecuteCall(invoked: string, args: unknown): ConnectorCall {
 /** Judge distinct target names against a bot's grants. grants undefined
  * is the legacy all-tools bot and passes everything; an explicit record —
  * including the empty one — allows only what it names. */
+/** candidates are the caller's connected-service slugs: the real backend
+ * slugs, so an underscored service (bland_ai) keeps its own tools instead
+ * of a plain-prefix grant (bland) capturing them. An empty list means the
+ * connected-service catalog was unreachable, and the plain first-segment
+ * split stands as the fallback — call-time enforcement degrades open, the
+ * same way advertisement filtering does. */
 export function evaluateConnectorTools(
   names: string[],
   grants: Record<string, ConnectorToolGrant> | undefined,
+  candidates: readonly string[] = [],
 ): ConnectorVerdict {
   if (grants === undefined) {
     return { allowed: true, legacy: true, denials: [], rule: "composio" };
@@ -136,7 +160,7 @@ export function evaluateConnectorTools(
   const denials: ConnectorDenial[] = [];
   let rule = "";
   for (const tool of new Set(names)) {
-    const service = serviceSlugFor(tool);
+    const service = serviceSlugForCandidates(tool, candidates) ?? serviceSlugFor(tool);
     const grant = service === null ? undefined : grants[service];
     if (grant && (grant.tools === "*" || grant.tools.includes(tool))) {
       if (!rule) rule = "connectorTools." + service;

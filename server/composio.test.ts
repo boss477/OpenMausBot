@@ -482,7 +482,7 @@ describe.sequential("Composio Sessions", () => {
     const { cards, pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_page_stuck" } });
 
     expect(cards).toEqual([expect.objectContaining({ slug: "gmail" })]);
-    expect(pagination).toEqual({ items: 1, stalled: true, complete: false });
+    expect(pagination).toEqual({ items: 1, stalled: true, complete: false, reason: "page-stuck" });
     expect(calls.slice(before).filter((call) => call.path === "/api/v3/toolkits")).toHaveLength(2);
   });
 
@@ -490,7 +490,7 @@ describe.sequential("Composio Sessions", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_stalled_total" } });
-      expect(pagination).toEqual({ items: 1, totalItems: 1540, stalled: true, complete: false });
+      expect(pagination).toEqual({ items: 1, totalItems: 1540, stalled: true, complete: false, reason: "end" });
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("partial marketplace"));
     } finally {
       warn.mockRestore();
@@ -501,8 +501,8 @@ describe.sequential("Composio Sessions", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_end_short" } });
-      expect(pagination).toEqual({ items: 1, stalled: true, complete: false });
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("partial marketplace"));
+        expect(pagination).toEqual({ items: 1, stalled: true, complete: false, reason: "end" });
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("partial marketplace"));
     } finally {
       warn.mockRestore();
     }
@@ -512,7 +512,7 @@ describe.sequential("Composio Sessions", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { pagination } = await listToolkits({ composio: { apiKey: "ak_catalog_partial" } });
-      expect(pagination).toEqual({ items: 3, totalItems: 5, stalled: true, complete: false });
+      expect(pagination).toEqual({ items: 3, totalItems: 5, stalled: true, complete: false, reason: "http-error" });
     } finally {
       warn.mockRestore();
     }

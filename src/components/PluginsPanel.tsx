@@ -255,6 +255,8 @@ export interface CatalogPagination {
   items: number;
   totalItems?: number;
   stalled: boolean;
+  /** Server-side stop reason, present only when the walk stalled (#1838). */
+  reason?: string;
 }
 
 export function PluginsPanel() {
@@ -729,6 +731,9 @@ export function PluginsPanel() {
                         total: pagination.totalItems.toLocaleString(),
                       })
                       : t("connectors.marketplace.partialStalled")}
+                    {pagination.reason
+                      ? ` — ${t("connectors.marketplace.partialReason", { reason: pagination.reason })}`
+                      : null}
                   </span>
                 )}
               </div>

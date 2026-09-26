@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+// scripts/mcp-server.ts snapshots process.env at import time — scrub ambient
+// OMB_* / OPENMAUSBOT_* values before it is evaluated (#1676).
+import "./testing/scrub-ambient-omb-env.ts";
+
 import {
   handleToolCall,
   probeBaseUrls,

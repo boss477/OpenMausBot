@@ -446,6 +446,59 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "auth_required" });
   });
 
+  it("settles an outdated CLI as update_required without emitting an assistant reply", async () => {
+    const message = "API Error: 400 Claude Code 2.1.268 does not support this model; version 2.1.280 or newer is required. Run 'claude update'.";
+    await create("api-error", { FAKE_CLAUDE_API_ERROR: message });
+    await instance.adapter.sendTurn({ threadId: "t-update", text: "hi" });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(recorder.events).toContainEqual(expect.objectContaining({
+      type: "runtime.error", message, setup: true, claudeUpdate: true,
+    }));
+    expect(recorder.events.some((event) => event.type === "item.completed" && event.itemType === "assistant_text")).toBe(false);
+    expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: false, stopReason: "update_required" });
+  });
+
+  it("retires an outdated child before retry while preserving a healthy pooled session", async () => {
+    await create(undefined, {
+      FAKE_CLAUDE_API_ERROR: "Claude Code 2.1.268 does not support this model; version 2.1.280 or newer is required.",
+    });
+    const healthyDump = join(scratch, "healthy-session.json");
+    process.env.FAKE_CLAUDE_DUMP = healthyDump;
+    const healthy = await instance.adapter.sendTurn({ threadId: "t-update-healthy", text: "keep this session" });
+    await recorder.until((event) => event.type === "turn.completed" && event.turnId === healthy.turnId);
+    const healthyBefore = readFileSync(healthyDump, "utf8");
+
+    process.env.FAKE_CLAUDE_MODE = "api-error";
+    const outdatedDump = join(scratch, "outdated-session.json");
+    process.env.FAKE_CLAUDE_DUMP = outdatedDump;
+    const resumeCursor = "fixture-update-session";
+    const outdated = await instance.adapter.sendTurn({ threadId: "t-update-retry", text: "try the model", resumeCursor });
+    await expect(recorder.until((event) => event.type === "turn.completed" && event.turnId === outdated.turnId))
+      .resolves.toMatchObject({ ok: false, stopReason: "update_required" });
+    const outdatedPid = JSON.parse(readFileSync(outdatedDump, "utf8")).pid;
+
+    // Only a new child sees this synthetic replacement runtime. An old
+    // pooled child keeps api-error mode, just as it keeps its loaded code
+    // after the executable on disk has been updated externally.
+    process.env.FAKE_CLAUDE_MODE = "happy";
+    const retryDump = join(scratch, "updated-session.json");
+    process.env.FAKE_CLAUDE_DUMP = retryDump;
+    const retry = await instance.adapter.sendTurn({ threadId: "t-update-retry", text: "retry explicitly", resumeCursor });
+    await expect(recorder.until((event) => event.type === "turn.completed" && event.turnId === retry.turnId))
+      .resolves.toMatchObject({ ok: true });
+    const replacement = JSON.parse(readFileSync(retryDump, "utf8"));
+    expect(replacement.pid).not.toBe(outdatedPid);
+    expect(replacement.argv).toContain("--resume");
+    expect(replacement.argv).toContain(resumeCursor);
+
+    const continued = await instance.adapter.sendTurn({ threadId: "t-update-healthy", text: "continue normally" });
+    await expect(recorder.until((event) => event.type === "turn.completed" && event.turnId === continued.turnId))
+      .resolves.toMatchObject({ ok: true });
+    expect(readFileSync(healthyDump, "utf8")).toBe(healthyBefore);
+    expect(JSON.parse(readFileSync(retryDump, "utf8")).pid).toBe(replacement.pid);
+    expect(recorder.events.some((event) => event.type === "turn.retrying")).toBe(false);
+  });
+
   it("keeps a workspace Anthropic key set on purpose while still dropping one from the parent env", async () => {
     await create(undefined, { ANTHROPIC_API_KEY: "sk-ant-workspace-fixture" });
     const dump = join(scratch, "dump-workspace-key.json");
@@ -1886,18 +1939,33 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("closes an idle session after the configured window", async () => {
-    process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS = "10";
-    process.env.OMB_CLAUDE_SESSION_IDLE_MS = "50";
+    // Ten seconds is the lowest window the floor allows now; poll the native
+    // log for the close rather than sleeping a fixed window past it.
+    process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS = "10000";
+    process.env.OMB_CLAUDE_SESSION_IDLE_MS = "10000";
     await create();
     await instance.adapter.sendTurn({ threadId: "t-idle", text: "one" });
     await recorder.until((e) => e.type === "turn.completed");
     process.env.FAKE_CLAUDE_DUMP = join(scratch, "idle-dump.json");
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 20_000;
+      const log = join(NATIVE_DIR, "t-idle.ndjson");
+      const check = () => {
+        if (Date.now() > deadline) return reject(new Error("idle close was never logged"));
+        try {
+          if (readFileSync(log, "utf8").includes('"close":"idle"')) return resolve();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") return reject(error);
+        }
+        setTimeout(check, 50);
+      };
+      check();
+    });
     const announced = (recorder.events.find((e) => e.type === "session.started") as { sessionId: string }).sessionId;
     const second = await instance.adapter.sendTurn({ threadId: "t-idle", text: "two", resumeCursor: announced });
     await recorder.until((e) => e.type === "turn.completed" && e.turnId === second.turnId);
     expect(JSON.parse(readFileSync(join(scratch, "idle-dump.json"), "utf8")).argv).toContain("--resume");
-  });
+  }, 30_000);
 
   it("an exit before result becomes runtime.error + failed turn", async () => {
     await create("exit-early");

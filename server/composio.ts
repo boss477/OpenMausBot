@@ -1321,6 +1321,17 @@ const CURATED: ToolkitCard[] = [
 
 let toolkitCache: { at: number; cards: ToolkitCard[]; identity: string; pagination: CatalogPagination } | null = null;
 
+/** Why a marketplace catalog walk ended. Every early exit names itself so a
+ * stalled catalog can be told apart from a complete one (#1614, #1838). */
+export type CatalogStopReason =
+  | "end"
+  | "total-reached"
+  | "page-stuck"
+  | "cursor-repeated"
+  | "http-error"
+  | "bad-page"
+  | "limit";
+
 /** What the marketplace endpoint is actually serving. A partial catalog is
  * usable, but only if the UI can say so instead of passing it off as the
  * whole marketplace (#1614). */
@@ -1331,6 +1342,9 @@ export interface CatalogPagination {
   totalItems?: number;
   /** True when paging stopped before the reported total. */
   stalled: boolean;
+  /** Why the walk stopped, whenever it stalled. Lets a client tell a stale
+   * broker replaying pages from an upstream API change (#1838). */
+  reason?: CatalogStopReason;
   /** True only when the walk reached its natural end — the last page
    * offered no cursor, or the reported page counts said done — without
    * stalling. stalled needs upstream totals to compare against; complete
@@ -1368,7 +1382,7 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
       // Why the walk ended. "limit" means the loop ran out of iterations;
       // every early exit names itself so a stalled catalog can be logged
       // instead of silently posing as the complete marketplace.
-      let stop: "end" | "total-reached" | "page-stuck" | "cursor-repeated" | "http-error" | "bad-page" | "limit" = "limit";
+      let stop: CatalogStopReason = "limit";
       for (let page = 0; page < MAX_CONNECTED_ACCOUNT_PAGES; page += 1) {
         const params = new URLSearchParams({ limit: "500", sort_by: "usage" });
         if (cursor) params.set("cursor", cursor);
@@ -1453,6 +1467,7 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
         const complete = (stop === "end" || stop === "total-reached") && !stalled;
         const pagination: CatalogPagination = { items: uniqueCards.length, stalled, complete };
         if (reportedTotalItems !== undefined) pagination.totalItems = reportedTotalItems;
+        if (pagination.stalled) pagination.reason = stop;
         if (pagination.stalled) {
           console.warn(
             `[composio] marketplace catalog paging stopped early (${stop}) after ${uniqueCards.length} toolkits`

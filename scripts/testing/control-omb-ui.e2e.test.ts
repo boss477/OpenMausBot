@@ -294,6 +294,26 @@ describe("control-omb ui drives the real renderer", () => {
     // CLI, so all three are verified; one failed and one was a dry run.
     expect(tree).toContain("3 steps · 3 verified · 1 failed · 1 dry run");
 
+    // Hit-test the actual layout, not just the Tailwind class strings: the
+    // blank band beside the floating card must reach the transcript while
+    // the card and composer remain interactive.
+    const hitTest = await ui("eval", info.ui, "--js", `(() => {
+      const card = document.querySelector('section[aria-label="This run"]');
+      const dock = card.parentElement.parentElement;
+      const rect = card.getBoundingClientRect();
+      const blank = document.elementFromPoint(dock.getBoundingClientRect().left + 8, rect.top + rect.height / 2);
+      const onCard = document.elementFromPoint(rect.left + 20, rect.top + 20);
+      const scroll = document.querySelector('[role="log"]').parentElement;
+      const composer = ${COMPOSER};
+      const input = composer.getBoundingClientRect();
+      return {
+        blankReachesTranscript: scroll.contains(blank) && !dock.contains(blank) && getComputedStyle(scroll).overflowY === 'auto',
+        cardInteractive: card.contains(onCard),
+        composerInteractive: document.elementFromPoint(input.left + input.width / 2, input.top + input.height / 2) === composer,
+      };
+    })()`);
+    expect(hitTest).toMatchObject({ result: { blankReachesTranscript: true, cardInteractive: true, composerInteractive: true } });
+
     // These are real control operations: the fixture health check succeeds
     // and a deliberately missing UI target rejects instead of reporting green.
     expect(await runControlOmb(["doctor", "--url", info.url])).toMatchObject({ ok: true });
@@ -308,10 +328,15 @@ describe("control-omb ui drives the real renderer", () => {
       const late = document.createElement("button");
       late.textContent = "Late QA control";
       late.setAttribute("aria-label", "Late QA control");
+      // Keep this synthetic target inside the viewport: appending a normal
+      // flow sibling below the full-height app makes click scroll the app
+      // out of view, interfering with the real controls exercised next.
+      late.style.cssText = 'position:fixed;top:0;left:0;z-index:2147483647';
       setTimeout(() => document.body.appendChild(late), 1500);
       return "planted";
     })()`);
     expect(await ui("click", info.ui, "--name", "Late QA control")).toMatchObject({ ok: true });
+    await ui("eval", info.ui, "--js", `document.querySelector('[aria-label="Late QA control"]').remove()`);
 
     mkdirSync(evidenceDir, { recursive: true });
     const shotPath = join(evidenceDir, "chat-ui.png");

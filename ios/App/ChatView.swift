@@ -297,7 +297,7 @@ struct ChatView: View {
                 // A conversation grows from the bottom: a transcript shorter
                 // than the screen rests at the bottom, and opening a chat
                 // starts on the newest message rather than the oldest.
-                .defaultScrollAnchor(.bottom)
+                .scrollAnchorCompat(.bottom)
                 // Tapping the transcript puts the keyboard away. The composer
                 // is a sibling of this scroll view rather than inside it, so
                 // nothing else here drops its focus — until this, the only way
@@ -311,7 +311,10 @@ struct ChatView: View {
                 // And a drag down over the transcript pushes it away, the way
                 // it does in Mail and Messages.
                 .scrollDismissesKeyboard(.interactively)
-                .onChange(of: transcript.last?.id) { _, _ in
+                // `initial: true` is what opens the chat on the newest
+                // message where `scrollAnchorCompat` cannot (iOS 16). On 17 the
+                // anchor has already put us there and this is a no-op.
+                .onValueChange(of: transcript.last?.id, initial: true) { _ in
                     guard let last = transcript.last else { return }
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
@@ -319,7 +322,7 @@ struct ChatView: View {
                 // the string so this fires once per delta batch, and without
                 // animation — animating every token turns a smooth stream
                 // into a stutter, because each scroll interrupts the last.
-                .onChange(of: session.state.streaming[threadId]?.count ?? 0) { _, length in
+                .onValueChange(of: session.state.streaming[threadId]?.count ?? 0) { length in
                     guard length > 0 else { return }
                     proxy.scrollTo(Self.liveBubbleId, anchor: .bottom)
                 }
@@ -367,21 +370,21 @@ struct ChatView: View {
             if ProcessInfo.processInfo.arguments.contains("-open-profile") { showingProfile = true }
 #endif
         }
-        .onChange(of: selectedThreadWasRemoved) { _, removed in
+        .onValueChange(of: selectedThreadWasRemoved) { removed in
             if removed { dismiss() }
         }
-        .onChange(of: session.state.hasLoadedPage(forThread: threadId)) { _, loaded in
+        .onValueChange(of: session.state.hasLoadedPage(forThread: threadId)) { loaded in
             let requestedThread = threadId
             if !loaded { Task { await session.loadThreadIfNeeded(requestedThread) } }
         }
-        .onChange(of: current.unread) { _, unread in
+        .onValueChange(of: current.unread) { unread in
             // A message can arrive while this chat is already on screen. The
             // initial task above will not run again, so clear that new unread
             // bit here rather than leaving a badge on an open conversation.
             let readChat = current
             if unread { Task { await session.markRead(readChat) } }
         }
-        .onChange(of: threadId) { previous, next in
+        .onValueChangePair(of: threadId) { previous, next in
             dictation.stop()
             threadDrafts[previous] = ComposerSnapshot(text: draft, attachments: attachments, error: attachmentError)
             let restored = threadDrafts.removeValue(forKey: next) ?? ComposerSnapshot()
@@ -397,7 +400,7 @@ struct ChatView: View {
             resetFilePreview()
             cancelThreadOpen()
         }
-        .onChange(of: session.connection?.id) { _, _ in
+        .onValueChange(of: session.connection?.id) { _ in
             cancelThreadOpen()
         }
         .onDisappear {
@@ -405,19 +408,19 @@ struct ChatView: View {
             resetFilePreview()
             cancelThreadOpen()
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onValueChange(of: scenePhase) { phase in
             if phase != .active { dictation.stop() }
         }
-        .onChange(of: showingComputer) { _, shown in
+        .onValueChange(of: showingComputer) { shown in
             if shown { dictation.stop() }
         }
-        .onChange(of: showingTasks) { _, shown in
+        .onValueChange(of: showingTasks) { shown in
             if shown { dictation.stop() }
         }
-        .onChange(of: showingProfile) { _, shown in
+        .onValueChange(of: showingProfile) { shown in
             if shown { dictation.stop() }
         }
-        .onChange(of: showingPlus) { _, shown in
+        .onValueChange(of: showingPlus) { shown in
             if shown { dictation.stop() }
         }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { note in
@@ -427,12 +430,12 @@ struct ChatView: View {
                 dictation.stop()
             }
         }
-        .onChange(of: dictation.transcript) { _, spoken in
+        .onValueChange(of: dictation.transcript) { spoken in
             // Always join against the text frozen at capture start. A newer
             // partial then replaces the older partial instead of duplicating it.
             draft = Dictation.draft(base: dictation.base, transcript: spoken)
         }
-        .onChange(of: dictation.isListening) { _, listening in
+        .onValueChange(of: dictation.isListening) { listening in
             if listening { composerFocused = false }
         }
         .sheet(isPresented: $showingTasks) {
@@ -453,7 +456,7 @@ struct ChatView: View {
             matching: .images,
             preferredItemEncoding: .current
         )
-        .onChange(of: selectedPhotos) { _, items in
+        .onValueChange(of: selectedPhotos) { items in
             guard !items.isEmpty else { return }
             Task { await importPhotos(items) }
         }
@@ -1071,11 +1074,31 @@ struct ChatView: View {
 
     // MARK: - Composer
 
+    /// Pull a held send back into the composer to tweak or extend it. The
+    /// computer drops it from the queue first; only a confirmed removal hands
+    /// the words back, so a send that already joined the turn is never resent.
+    private func editQueued(_ send: QueuedSend) {
+        let targetThread = threadId
+        let chat = current
+        Task {
+            guard await session.cancelQueued(send, threadId: targetThread, in: chat) else { return }
+            if threadId == targetThread {
+                draft = send.editDraft(keeping: draft)
+                composerFocused = true
+            } else {
+                // The person switched tasks while the cancel was in flight.
+                var snapshot = threadDrafts[targetThread] ?? ComposerSnapshot()
+                snapshot.text = send.editDraft(keeping: snapshot.text)
+                threadDrafts[targetThread] = snapshot
+            }
+        }
+    }
+
     /// A round + and a glass pill with dictation and send inside it.
     private var composer: some View {
         VStack(spacing: 6) {
             if !heldSends.isEmpty {
-                QueuedSendList(sends: heldSends) { send in
+                QueuedSendList(sends: heldSends, edit: editQueued) { send in
                     Task { await session.cancelQueued(send, threadId: threadId, in: current) }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1180,7 +1203,7 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 2)
                 }
-                .scrollClipDisabled()
+                .scrollClipDisabledCompat()
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -1239,7 +1262,7 @@ struct ChatView: View {
                                 !dictation.isListening && !dictation.isStarting
                                     && !preparingAttachments && !sendingMessage
                             )
-                            .onChange(of: draft) { _, value in
+                            .onValueChange(of: draft) { value in
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     showCommandHUD = value.hasPrefix("/")
                                 }
@@ -1249,11 +1272,7 @@ struct ChatView: View {
                             // hardware Return still sends, Shift-Return breaks
                             // the line. onKeyPress never sees the software
                             // keyboard, so this cannot turn its Return into a send.
-                            .onKeyPress(.return, phases: .down) { press in
-                                if press.modifiers.contains(.shift) { return .ignored }
-                                submit()
-                                return .handled
-                            }
+                            .onHardwareReturn { submit() }
 
                         Button {
                             composerFocused = false
@@ -1270,7 +1289,7 @@ struct ChatView: View {
                                             : Color.secondary.opacity(0.12)
                                     )
                                 )
-                                .symbolEffect(.pulse, isActive: dictation.isListening)
+                                .pulseCompat(isActive: dictation.isListening)
                         }
                         .buttonStyle(.plain)
                         .disabled(preparingAttachments || sendingMessage)
@@ -1464,6 +1483,14 @@ struct MessageRow: View {
             }
         case .activity:
             ActivityChip(tool: message.tool, threadRef: message.threadRef, openThread: openThread)
+            // A turn that failed because Claude Code is too old for the
+            // model: offer to run the updater for the engine this thread uses.
+            if message.tool?.claudeUpdate == true, case let .bot(bot) = chat {
+                ClaudeUpdateCard(
+                    instanceId: bot.currentTaskModelSelection.instanceId,
+                    tint: MausPalette.color(chat.color)
+                )
+            }
         case .compaction:
             ReceiptChip(icon: "square.3.layers.3d", label: message.compaction?.chipText ?? message.text ?? "") {
                 selecting = SelectableText(text: message.compaction?.summary ?? message.text ?? "")
@@ -1976,7 +2003,7 @@ struct CredentialRequestCardView: View {
                 secret: secret
             )
         }
-        .onChange(of: requestIdentity) { _, _ in
+        .onValueChange(of: requestIdentity) { _ in
             resetSensitiveState(clearPrepared: true)
             preparedSubmission = session.preparedCredential(
                 chat: chat,
@@ -1985,13 +2012,13 @@ struct CredentialRequestCardView: View {
             )
             submitted = false
         }
-        .onChange(of: session.credentialEntryResetGeneration) { _, _ in
+        .onValueChange(of: session.credentialEntryResetGeneration) { _ in
             suspendSensitiveEntry()
         }
-        .onChange(of: session.status) { _, status in
+        .onValueChange(of: session.status) { status in
             if status != .live { suspendSensitiveEntry() }
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onValueChange(of: scenePhase) { phase in
             // Password AutoFill and its Face ID sheet temporarily make the
             // scene inactive. Removing the SecureField at that point breaks
             // the very fill operation the user requested. A true background
@@ -2356,10 +2383,11 @@ struct StreamingBubble: View {
 }
 
 /// The held sends for one thread, as the desktop's composer shows them: one
-/// line each, deletable, with a note when the harness held them for thread
-/// capacity rather than because a turn is running.
+/// line each, editable and deletable, with a note when the harness held them
+/// for thread capacity rather than because a turn is running.
 private struct QueuedSendList: View {
     let sends: [QueuedSend]
+    let edit: (QueuedSend) -> Void
     let cancel: (QueuedSend) -> Void
 
     private var showsCapacityNote: Bool {
@@ -2384,6 +2412,17 @@ private struct QueuedSendList: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        edit(send)
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.secondary)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit queued message \(index + 1) of \(sends.count)")
                     Button {
                         cancel(send)
                     } label: {

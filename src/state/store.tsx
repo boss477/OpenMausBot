@@ -88,6 +88,10 @@ export interface OptionCardData {
   tool?: string;
   /** why auto mode stopped to ask anyway */
   held?: string;
+  /** Terminal: this proposal went stale while open (revision mismatch or
+   * a superseding request). Nothing can answer it; a fresh proposal is
+   * needed, and clients must not offer its options. */
+  expired?: boolean;
   /** catalog key for `held` when it is a fixed note, so it reads in the
    * viewer's language; absent for free-text errors and older cards */
   heldCode?: string;
@@ -130,6 +134,9 @@ export interface SecretRequestCardData {
   requestKey: string;
   provided?: boolean;
   dismissed?: boolean;
+  /** A newer request for the same credential replaced this card; it no
+   * longer offers entry and cannot be provided or dismissed. */
+  superseded?: boolean;
   resumed?: boolean;
   error?: string;
 }
@@ -158,7 +165,7 @@ export interface Message {
    * narration of the same chip ("reading a file"), used by call mode. */
   /** `setup` marks an error fixed by installing something, not by retrying.
    * `summary` is the call's input on one redacted line (the shell command). */
-  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; summary?: string; input?: string; output?: string ; itemId?: string; outputPath?: string; fullResult?: boolean };
+  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; claudeUpdate?: boolean; summary?: string; input?: string; output?: string ; itemId?: string; outputPath?: string; fullResult?: boolean };
   /** user messages sent into a running turn — the model saw it mid-turn */
   steered?: boolean;
   /** a user message that arrived through the server's API, not typed here */
@@ -398,6 +405,8 @@ export interface Bot {
   speakReplies?: boolean;
   /** this bot's own voice id (falls back to the app-wide one) */
   voice?: string;
+  /** whether this bot may send voice notes (on unless switched off) */
+  voiceNotes?: boolean;
   pinned?: boolean;
   hidden?: boolean;
   /** Sidebar section this bot renders under; absent = unsectioned. */
@@ -1074,9 +1083,9 @@ export type Action =
     }
   | { type: "pendingQueued"; threadId: string; queueId: string; text: string; reason?: SteerQueueReason }
   | { type: "consumePendingQueued"; threadId: string; queueId: string }
-  | { type: "cancelQueued"; botId: string; queueId: string; threadId?: string }
+  | { type: "cancelQueued"; botId: string; queueId: string; threadId?: string; onCancelled?: () => void }
   | { type: "steerQueued"; botId: string; queueId: string; threadId?: string; onError?: () => void; onSettled?: () => void }
-  | { type: "cancelGroupQueued"; groupId: string; threadId: string; queueId: string }
+  | { type: "cancelGroupQueued"; groupId: string; threadId: string; queueId: string; onCancelled?: () => void }
   | { type: "steerGroupQueued"; groupId: string; queueId: string; threadId?: string; onError?: () => void; onSettled?: () => void }
   | { type: "editMessage"; botId: string; messageId: string; text: string; threadId?: string; sendId?: string }
   | { type: "switchBranch"; botId: string; messageId: string; threadId?: string }
@@ -2980,7 +2989,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "cancelQueued":
           void api(`/api/bots/${action.botId}/queue/${action.queueId}`, { method: "DELETE", body: JSON.stringify({ threadId: action.threadId }) })
-            .then(() => rawDispatch(action))
+            .then(() => {
+              rawDispatch(action);
+              action.onCancelled?.();
+            })
             .catch(showError);
           break;
         case "steerQueued":
@@ -3003,7 +3015,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "cancelGroupQueued":
           void api(`/api/groups/${action.groupId}/queue/${action.queueId}`, { method: "DELETE" })
-            .then(() => rawDispatch(action))
+            .then(() => {
+              rawDispatch(action);
+              action.onCancelled?.();
+            })
             .catch(showError);
           break;
         case "steerGroupQueued":

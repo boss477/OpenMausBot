@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { soulDiffLines } from "../shared/line-diff.ts";
 import { newId, type ModelSelection } from "./contracts.ts";
 import { fitsOnOneLine, parseBotProfilePatch } from "./bot-profile.ts";
 import { profileSnapshot } from "./profile-revision.ts";
@@ -10,6 +11,14 @@ import type { TeamSetupFields, TeamSetupOperation, TeamSetupRequest, TeamSetupRe
 
 const section = (value?: string) => value?.trim() || "";
 const teamName = z.string().trim().min(1).max(60).refine(fitsOnOneLine).refine((value) => redactSecretsInText(value) === value, "Team names cannot contain credentials");
+const FIELD_LABELS: Record<string, string> = { name: "Name", title: "Title", description: "Description", section: "Section", cwd: "Working folder" };
+// The variant rides ModelSelection, and a proposal that omits it removes it,
+// so the review text says both states outright: set on the current
+// selection, explicitly absent on the proposed one. Otherwise a bot with a
+// configured variant shows a before value that hides the setting changing
+// under it.
+const modelSelectionText = (selection: ModelSelection) =>
+  `${selection.instanceId}/${selection.model}${selection.variant ? ` (variant ${selection.variant})` : " (no variant)"}${selection.effort ? ` (effort ${selection.effort})` : ""}`;
 const fieldsSchema = z.object({
   chiefOfStaff: z.boolean().optional(),
   name: z.string().optional(), title: z.string().optional(), description: z.string().optional(), soul: z.string().optional(),
@@ -31,15 +40,37 @@ export class TeamSetupError extends Error {
   constructor(message: string, status = 400) { super(message); this.status = status; }
 }
 
-/** Settings relevant to approval, including the previous durable receipt. */
-export function teamSetupRevision(bot: BotRecord): string {
-  return createHash("sha256").update(JSON.stringify({
-    ...profileSnapshot(bot), section: section(bot.section), modelSelection: bot.modelSelection,
-    hidden: Boolean(bot.hidden), chiefOfStaff: Boolean(bot.chiefOfStaff), peers: bot.peers,
-    managedSections: bot.managedSections,
-    approvalMode: bot.approvalMode, autoApprove: bot.autoApprove, approvalGrant: bot.approvalGrant,
-    receipt: bot.lastTeamSetupReceipt?.requestId,
-  })).digest("hex");
+/**
+ * The revision a team-setup card pins to. Without `fields` it hashes the
+ * bot's whole state — any drift cancels — which the destructive deletion
+ * path keeps on purpose. With `fields` (setup plans) it pins exactly the
+ * before-values the card displayed for the fields the plan touches;
+ * authority, team scope, peer scope, visibility, busyness, destination, and
+ * name collisions are re-checked fresh at confirm time, so drift on
+ * untouched fields no longer cancels a plan that never claimed to touch
+ * them. Every update card renders a section line, so section stays pinned
+ * even when the plan only carries it through unchanged.
+ */
+export function teamSetupRevision(bot: BotRecord, fields?: TeamSetupFields): string {
+  if (fields === undefined) {
+    return createHash("sha256").update(JSON.stringify({
+      ...profileSnapshot(bot), section: section(bot.section), modelSelection: bot.modelSelection,
+      hidden: Boolean(bot.hidden), chiefOfStaff: Boolean(bot.chiefOfStaff), peers: bot.peers,
+      managedSections: bot.managedSections,
+      approvalMode: bot.approvalMode, autoApprove: bot.autoApprove, approvalGrant: bot.approvalGrant,
+      receipt: bot.lastTeamSetupReceipt?.requestId,
+    })).digest("hex");
+  }
+  const snapshot = profileSnapshot(bot);
+  const scope: Record<string, unknown> = {};
+  if (fields.name !== undefined) scope.name = snapshot.name;
+  if (fields.title !== undefined) scope.title = snapshot.title;
+  if (fields.description !== undefined) scope.description = snapshot.description;
+  if (fields.soul !== undefined) scope.soul = snapshot.soul;
+  if (fields.section !== undefined) scope.section = section(bot.section);
+  if (fields.modelSelection !== undefined) scope.modelSelection = bot.modelSelection;
+  if (fields.chiefOfStaff !== undefined) scope.chiefOfStaff = Boolean(bot.chiefOfStaff);
+  return createHash("sha256").update(JSON.stringify(scope)).digest("hex");
 }
 
 interface SetupStore {
@@ -83,6 +114,19 @@ export class TeamSetupRequestService {
     return chief;
   }
 
+  /**
+   * The Chief's own pinned state: the fields this plan's operations display
+   * about the Chief, or the whole state for deletions. A plan that never
+   * touches the Chief pins nothing of the Chief's — its authority is
+   * re-checked fresh at confirm time either way.
+   */
+  private requesterScope(request: TeamSetupRequest): TeamSetupFields | undefined {
+    if (request.deletion) return undefined;
+    const scope: TeamSetupFields = {};
+    for (const operation of request.operations) if (operation.botId === request.botId) Object.assign(scope, operation.fields);
+    return scope;
+  }
+
   private fields(input: z.infer<typeof fieldsSchema>, current?: BotRecord): TeamSetupFields {
     const { section: targetSection, modelSelection, chiefOfStaff, cwd: rawCwd, ...profile } = input;
     const safe = Object.fromEntries(Object.entries(profile).map(([key, value]) => [key, redactSecretsInText(value!)]));
@@ -114,7 +158,7 @@ export class TeamSetupRequestService {
     if (!this.options.ownsThread(request.botId, request.threadId)) throw new TeamSetupError("The requesting conversation no longer exists", 409);
     if (immediate && !this.options.autoApply?.(request.botId, request.threadId)) throw new TeamSetupError("Full Access is no longer enabled for this conversation", 409);
     if (confirming && !immediate && !this.options.store.messagesFor(request.threadId).some((message) => message.card?.requestId === request.requestId && !message.card.answered && !message.card.dismissed)) throw new TeamSetupError("This setup card is no longer pending", 409);
-    if (confirming && teamSetupRevision(chief) !== request.requesterRevision) throw new TeamSetupError("The Chief's settings changed. This setup was cancelled; review a new proposal.", 409);
+    if (confirming && teamSetupRevision(chief, this.requesterScope(request)) !== request.requesterRevision) throw new TeamSetupError("The Chief's settings changed. This setup was cancelled; review a new proposal.", 409);
     const existingTeams = new Set(this.options.teams().map(section));
     if (new Set([...(chief.managedSections ?? []), ...request.newTeams]).size > 100) throw new TeamSetupError("A Chief may coordinate at most 100 additional teams", 409);
     for (const name of request.newTeams) if (existingTeams.has(name)) throw new TeamSetupError(`Team ${JSON.stringify(name)} now exists. Review a new proposal.`, 409);
@@ -130,7 +174,7 @@ export class TeamSetupRequestService {
         if (!operation.fields.name?.trim() || !operation.fields.title?.trim() || !operation.fields.soul?.trim() || !operation.fields.modelSelection) throw new TeamSetupError("Each new bot needs a name, title, soul instructions, and exact model selection");
       } else {
         if (!target || target.hidden || !this.options.canAccessTeam(chief, target.section) || (target.id !== chief.id && Array.isArray(chief.peers) && !chief.peers.includes(target.id))) throw new TeamSetupError("A target bot is outside this Chief's authorized team and peer scope", 403);
-        if (teamSetupRevision(target) !== operation.expectedRevision) throw new TeamSetupError(`@${target.name} changed. This setup was cancelled; review a new proposal.`, 409);
+        if (teamSetupRevision(target, operation.fields) !== operation.expectedRevision) throw new TeamSetupError(`@${target.name} changed. This setup was cancelled; review a new proposal.`, 409);
         const sourceThreadId = immediate && target.id === chief.id ? request.threadId : undefined;
         if (this.options.targetBusy(target.id, sourceThreadId) && (confirming || target.id !== chief.id)) throw new TeamSetupError(`Stop @${target.name}'s work before changing its setup`, 409);
       }
@@ -170,14 +214,17 @@ export class TeamSetupRequestService {
     if (combined.size > 8) throw new TeamSetupError("Review at most eight bots in one setup");
     const operations: TeamSetupOperation[] = [...combined.values()].map((operation) => {
       const target = operation.action === "update" ? this.options.store.bot(operation.botId) : undefined;
+      const fields = this.fields({ ...operation.fields, section: operation.fields.section ?? target?.section ?? chief.section ?? "" }, target ?? undefined);
       return { action: operation.action, botId: operation.action === "create" ? newId() : operation.botId,
         ...(operation.action === "create" ? { threadId: newId() } : {}),
-        fields: this.fields({ ...operation.fields, section: operation.fields.section ?? target?.section ?? chief.section ?? "" }, target ?? undefined),
-        ...(target ? { expectedRevision: teamSetupRevision(target) } : {}),
+        fields,
+        ...(target ? { expectedRevision: teamSetupRevision(target, fields) } : {}),
       };
     });
+    const requesterScope: TeamSetupFields = {};
+    for (const operation of operations) if (operation.botId === chief.id) Object.assign(requesterScope, operation.fields);
     const request: TeamSetupRequest = { version: 1, requestId: newId(), botId: args.botId, threadId: args.threadId,
-      reason: redactSecretsInText(parsed.data.reason), createdAt: Date.now(), requesterRevision: teamSetupRevision(chief),
+      reason: redactSecretsInText(parsed.data.reason), createdAt: Date.now(), requesterRevision: teamSetupRevision(chief, requesterScope),
       newTeams: [...new Set(parsed.data.newTeams)], operations };
     this.validate(request, false);
     return request;
@@ -228,9 +275,18 @@ export class TeamSetupRequestService {
           lines.push(`Chief of Staff: ${current?.chiefOfStaff ? "Yes" : "No"} → ${value ? "Yes" : "No"}.${value ? " May coordinate and configure bots in this team." : " Additional managed-team access is removed."}`);
           continue;
         }
-        const before = current ? (key === "section" ? current.section || "General" : current[key as keyof BotRecord]) : undefined;
-        const label = key === "modelSelection" ? "Default engine/model" : key === "cwd" ? "Working folder" : key;
-        lines.push(`${label}: ${current ? `${JSON.stringify(before ?? "")} → ` : ""}${key === "section" ? JSON.stringify(value || "General") : JSON.stringify(value)}`);
+        // The same review shape the profile card uses: labeled before/after
+        // lines, and SOUL.md as a line diff with the shared large-change
+        // fallback — never a JSON.stringify blob of the instructions.
+        if (key === "soul") {
+          lines.push(...soulDiffLines(current?.soul ?? "", value as string));
+        } else if (key === "modelSelection") {
+          lines.push(`Default engine/model: ${current ? `${modelSelectionText(current.modelSelection)} → ` : ""}${modelSelectionText(value as ModelSelection)}`);
+        } else {
+          const before = current ? (key === "section" ? current.section || "General" : String(current[key as keyof BotRecord] ?? "")) : undefined;
+          const after = key === "section" ? (value as string) || "General" : String(value);
+          lines.push(`${FIELD_LABELS[key] ?? key}: ${current ? `"${before}" → ` : ""}"${after}"`);
+        }
       }
     }
     if (!request.deletion) {
@@ -290,7 +346,7 @@ export class TeamSetupRequestService {
     let messageId: string | undefined;
     try {
       messageId = this.options.store.appendMessage(request.threadId, { role: "bot", kind: "options", ...(from ? { from } : {}), card: {
-        ...card, title, options: [], answered: result.state === "applied" ? "allow" : "deny", held: result.error,
+        ...card, title, options: [], ...(result.state === "applied" ? { answered: "allow" as const } : { expired: true }), held: result.error,
         teamSetupRequest: { ...request, result, resumed: true },
       } }).id;
     } catch (error) {
@@ -309,7 +365,7 @@ export class TeamSetupRequestService {
     if (args.behavior !== "allow" && args.behavior !== "deny") throw new TeamSetupError("Confirm or cancel this setup", 400);
     // Stop/dismiss can close a card without a setup decision. It must never
     // resurrect that review or wake the stopped conversation.
-    if (card.answered || card.dismissed) {
+    if (card.answered || card.dismissed || card.expired) {
       const result = request.result ?? { state: "cancelled" as const, bots: [], newTeams: [], error: "This setup card was closed" };
       return { result, request: { ...request, result }, messageId: message.id, duplicate: true };
     }
@@ -321,7 +377,11 @@ export class TeamSetupRequestService {
       if (receipt?.requestId === request.requestId) result = receipt.result;
       else if (args.behavior === "deny") result = { state: "denied", bots: [], newTeams: [] };
       else result = await this.apply(request);
-      this.options.store.patchMessage(args.threadId, message.id, { card: { ...card, answered: result.state === "applied" ? "allow" : "deny", held: result.error, teamSetupRequest: { ...request, result } } });
+      // A setup that could not apply is dead, not denied: the card settles
+      // expired with its options removed, so it stops looking actionable and
+      // the one-line held note says to review a fresh proposal.
+      const dead = result.state !== "applied" && result.state !== "denied";
+      this.options.store.patchMessage(args.threadId, message.id, { card: { ...card, ...(dead ? { expired: true, options: [] } : { answered: result.state === "applied" ? "allow" : "deny" }), held: result.error, teamSetupRequest: { ...request, result } } });
       return { result, request: { ...request, result }, messageId: message.id, duplicate: false };
     } finally { this.resolving.delete(request.requestId); }
   }

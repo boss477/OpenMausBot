@@ -119,6 +119,10 @@ public struct ToolActivity: Codable, Hashable, Sendable {
     public var spoken: String?
     /// Marks an error fixed by installing something, not by retrying.
     public var setup: Bool?
+    /// Marks an error caused by a Claude Code CLI too old for the chosen
+    /// model; the phone offers to run Claude's updater. Absent on older
+    /// computers, so it stays optional.
+    public var claudeUpdate: Bool?
 }
 
 /// A compaction record: from this message on, rebuilds of the thread's
@@ -444,6 +448,14 @@ public struct QueuedSend: Codable, Hashable, Identifiable, Sendable {
         self.text = text
         self.reason = reason
     }
+
+    /// The composer text after this held send is pulled back for editing.
+    /// Its words lead — they were written first — and anything already typed
+    /// stays below them after a blank line, so an edit never drops a draft.
+    public func editDraft(keeping draft: String) -> String {
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return text }
+        return "\(text)\n\n\(draft)"
+    }
 }
 
 public struct Bot: Codable, Hashable, Identifiable, Sendable {
@@ -566,6 +578,41 @@ public struct BotOverviewRecent: Codable, Hashable, Sendable {
     public var summary: String
 }
 
+/// One service's connector tool grants, summarized for read-only display.
+/// Levels mirror the web grant editor: all tools, an exact list of
+/// `toolCount` tools, or no tools.
+public struct BotOverviewGrant: Codable, Hashable, Sendable {
+    public enum Level: String, Codable, Hashable, Sendable {
+        case all
+        case partial
+        case none
+
+        /// The server may add levels before this app updates. Falling back
+        /// to partial keeps the row honest ("some tools") without costing
+        /// the reader the whole overview.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Self(rawValue: raw) ?? .partial
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+    }
+
+    public var slug: String
+    public var level: Level
+    /// Granted tool count; 0 unless level is partial.
+    public var toolCount: Int
+
+    public init(slug: String, level: Level, toolCount: Int) {
+        self.slug = slug
+        self.level = level
+        self.toolCount = toolCount
+    }
+}
+
 /// A read-only summary of one bot: who it is, what it does, what it can
 /// reach, what it won't do, and its recent activity. No settings and no
 /// transcript — this is the shape a phone is allowed to poll for.
@@ -575,6 +622,49 @@ public struct BotOverview: Codable, Hashable, Sendable {
     public var reaches: [String]
     public var wont: [String]
     public var recent: [BotOverviewRecent]
+    /// Per-service connector tool grants, when the bot carries a grants
+    /// record. Older computers omit the key entirely (legacy all-tools
+    /// behavior); an empty list is an explicit no-tools record.
+    public var grants: [BotOverviewGrant]?
+
+    private enum CodingKeys: String, CodingKey {
+        case who, does, reaches, wont, recent, grants
+    }
+
+    public init(
+        who: BotOverviewWho,
+        does: [String],
+        reaches: [String],
+        wont: [String],
+        recent: [BotOverviewRecent],
+        grants: [BotOverviewGrant]? = nil
+    ) {
+        self.who = who
+        self.does = does
+        self.reaches = reaches
+        self.wont = wont
+        self.recent = recent
+        self.grants = grants
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        who = try container.decode(BotOverviewWho.self, forKey: .who)
+        does = try container.decode([String].self, forKey: .does)
+        reaches = try container.decode([String].self, forKey: .reaches)
+        wont = try container.decode([String].self, forKey: .wont)
+        recent = try container.decode([BotOverviewRecent].self, forKey: .recent)
+        // One malformed entry must not cost the whole overview; a shape
+        // this build cannot read is dropped, like elsewhere in the fleet.
+        // If every entry is unreadable, though, the grants field stays
+        // absent rather than claiming the bot deliberately grants nothing.
+        if let list = try? container.decodeIfPresent([Lossy<BotOverviewGrant>].self, forKey: .grants) {
+            let readable = list.compactMap(\.value)
+            grants = readable.isEmpty && !list.isEmpty ? nil : readable
+        } else {
+            grants = nil
+        }
+    }
 }
 
 public struct GroupResponder: Codable, Hashable, Sendable {

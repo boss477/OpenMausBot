@@ -36,6 +36,8 @@ import { gateServer, resultBudget } from "../mcp-gate-config.ts";
 import { newEventId, newId } from "../contracts.ts";
 import { askInputSummary, commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
+import { sessionIdlePolicy } from "./session-idle.ts";
+import { parseVersionTriple, versionAtLeast } from "./acp/core.ts";
 import {
   applyClaudeInject,
   decodeInjectId,
@@ -149,6 +151,20 @@ export function claudeAuthFailure(
 ): boolean {
   if (frame.is_api_error_message !== true && typeof frame.error !== "string") return false;
   return frame.error === "authentication_failed" || classifyError({ text }).reason === "auth";
+}
+
+/** A model newer than the installed Claude Code: the API refuses it and the
+ * CLI relays that as an api-error frame ("Claude Code 2.1.268 does not
+ * support this model; version 2.1.280 or newer is required. Run 'claude
+ * update'…"). It names no model, so it covers every model it happens for.
+ * Like a signed-out turn, it is fixed by changing the install, not by a
+ * retry, so the UI offers to run the update. */
+export function claudeVersionTooOld(
+  frame: { error?: unknown; is_api_error_message?: unknown },
+  text: string,
+): boolean {
+  if (frame.is_api_error_message !== true && typeof frame.error !== "string") return false;
+  return /\bClaude Code v?\d+(?:\.\d+)+ does not support this model\b/i.test(text);
 }
 
 /** The CLI environment shared by auth probes and real turns.
@@ -326,16 +342,7 @@ export const CLAUDE_CONTEXT_CONTROL_MIN_VERSION: ClaudeCliVersion = CLAUDE_FLAG_
  * is the version. Null when nothing parses, e.g. a wrapper that prints its
  * own banner first — see claudeCliSupports for how that is treated. */
 export function parseClaudeCliVersion(stdout: string | null | undefined): ClaudeCliVersion | null {
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(stdout ?? "");
-  if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function versionAtLeast(installed: ClaudeCliVersion, floor: ClaudeCliVersion): boolean {
-  for (let i = 0; i < 3; i += 1) {
-    if (installed[i] !== floor[i]) return installed[i] > floor[i];
-  }
-  return true;
+  return parseVersionTriple(stdout ?? "");
 }
 
 /** Whether a CLI reporting `version` accepts `flag`. A version that could
@@ -1001,7 +1008,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
        * the truth — this is. null until init, or on a CLI that omits it. */
       nativePermissionMode: string | null;
       /** the running turn, or null between turns */
-      turn: { turnId: string; input: SendTurnInput; retryAbort: AbortController; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean; stopRequested?: boolean } | null;
+      turn: { turnId: string; input: SendTurnInput; retryAbort: AbortController; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean; updateRequired?: boolean; stopRequested?: boolean } | null;
       idleTimer: ReturnType<typeof setTimeout> | null;
       closing: boolean;
       stderr: string;
@@ -1009,11 +1016,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       finishClose?: () => Promise<void>;
     }
     const sessions = new Map<string, Session>();
-    const configuredIdleMinimum = Number(process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS);
-    const sessionIdleMinimum = Number.isFinite(configuredIdleMinimum) && configuredIdleMinimum > 0
-      ? configuredIdleMinimum
-      : 10_000;
-    const SESSION_IDLE_MS = Math.max(sessionIdleMinimum, Number(process.env.OMB_CLAUDE_SESSION_IDLE_MS) || 10 * 60_000);
+    const { idleMs: SESSION_IDLE_MS } = sessionIdlePolicy("CLAUDE");
 
     const stopSession = (session: Session) => {
       void killCliTree(session.child).then((stopped) => {
@@ -1582,6 +1585,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         // A settled turn owns no retry budget. Retained CLI sessions may run
         // many later turns on this thread, and each must start fresh.
         retryState.delete(threadId);
+        // Updating the executable cannot update code already loaded by this
+        // pooled child. Retire it before announcing completion so an explicit
+        // retry resumes on a fresh process; healthy sibling sessions stay warm.
+        if (stopReason === "update_required") closeSession(threadId, "update required");
         emit({ ...base(threadId, t.turnId), type: "turn.completed", ok, stopReason, cost, ...(usage ? { usage } : {}) });
         if (session.child.exitCode === null && !session.closing) armIdle(threadId);
       };
@@ -1633,6 +1640,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             if (claudeAuthFailure(o, text)) {
               if (session.turn) session.turn.authFailed = true;
               emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: text, setup: true });
+              break;
+            }
+            if (claudeVersionTooOld(o, text)) {
+              if (session.turn) session.turn.updateRequired = true;
+              emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: text, setup: true, claudeUpdate: true });
               break;
             }
             if (text.trim()) {
@@ -1697,7 +1709,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             // of the figure was context re-read rather than new text.
             settle(
               o.is_error !== true,
-              session.turn?.authFailed ? "auth_required" : o.stop_reason ?? o.terminal_reason ?? null,
+              session.turn?.authFailed
+                ? "auth_required"
+                : session.turn?.updateRequired
+                  ? "update_required"
+                  : o.stop_reason ?? o.terminal_reason ?? null,
               o.total_cost_usd ?? null,
               o.usage
                 ? {

@@ -259,9 +259,10 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     // transcript's secret-redaction boundary.
     if (card.profileRequest) {
       const scrubChanges = (changes: ProfileRequestChanges): ProfileRequestChanges => {
-        const out: ProfileRequestChanges = {};
+        const out = { ...changes };
         for (const [key, value] of Object.entries(changes)) {
-          out[key as keyof ProfileRequestChanges] = redactSecretsInText(value);
+          // Booleans carry no text to scrub; only string fields pass through redaction.
+          if (typeof value === "string") (out as Record<string, string | boolean>)[key] = redactSecretsInText(value);
         }
         return out;
       };
@@ -383,6 +384,8 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
   };
   /** Receipt committed with a confirmed profile, for retrying card settlement. */
   lastProfileRequestId?: string;
+  /** Receipt committed with a confirmed authority tightening, for retrying card settlement. */
+  lastTighteningRequestId?: string;
   /** Receipt committed with a reviewed team batch; prevents replay after a lost response. */
   lastTeamSetupReceipt?: { requestId: string; result: TeamSetupResult };
   /** Organization library only: each part's release and written hashes
@@ -395,7 +398,7 @@ export interface BotRecord extends Omit<WireBot, "avatarUrl" | "tasks"> {
  * WireTask[], avatarUrl is coerced to always-present). The exactness
  * assertion fails to compile when either side drifts, so a new server
  * field forces a decision — wire-visible or private here. */
-export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTeamSetupReceipt" | "packageBase";
+export type BotWirePrivateKeys = "resumeCursors" | "tasks" | "avatarUrl" | "approvalGrant" | "lastProfileRequestId" | "lastTighteningRequestId" | "lastTeamSetupReceipt" | "packageBase";
 export type BotWireProjection = Pick<BotRecord, Exclude<keyof BotRecord, BotWirePrivateKeys>>;
 export type BotWireProjectionIsExact = AssertExact<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection> & AssertSameKeys<Omit<WireBot, "avatarUrl" | "tasks">, BotWireProjection>;
 export const botWireProjectionIsExact: BotWireProjectionIsExact = true;

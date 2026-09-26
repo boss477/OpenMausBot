@@ -131,7 +131,7 @@ describe("reviewed Chief team setup", () => {
     const mira = specialist("Mira", "Work");
     const folder = mkdtempSync(join(tmpdir(), "omb-team-cwd-"));
     const withFolder = h.propose([{ ...mira, fields: { ...mira.fields, cwd: folder } }]);
-    expect(withFolder.detail).toContain(`Working folder: ${JSON.stringify(folder)}`);
+    expect(withFolder.detail).toContain(`Working folder: "${folder}"`);
     expect(() => h.propose([{ ...mira, fields: { ...mira.fields, cwd: "relative/path" } }]))
       .toThrow("working folder must be an absolute path");
     expect(() => h.propose([{ ...mira, fields: { ...mira.fields, cwd: join(folder, "missing") } }]))
@@ -145,7 +145,7 @@ describe("reviewed Chief team setup", () => {
     expect(card.detail).toContain("Default engine/model:");
     // A variant-only change must render as a real before-and-after, never
     // an identical pair with the variant silently stripped.
-    expect(card.detail).toContain('{"instanceId":"claude","model":"sonnet"} → {"instanceId":"claude","model":"sonnet","variant":"stable"}');
+    expect(card.detail).toContain("claude/sonnet (no variant) → claude/sonnet (variant stable)");
   });
   it("coalesces each bot's fields into one review and applies once with a durable receipt", async () => {
     const h = harness();
@@ -195,7 +195,8 @@ describe("reviewed Chief team setup", () => {
   it.each(["target", "chief", "team", "scope", "busy", "source"])("cancels a %s change while the review was open, without any batch mutation", async (change) => {
     const h = harness();
     const request = h.propose([{ action: "update", botId: h.peer.id, fields: { title: "Researcher", section: "Engineering" } }, specialist("Mira", "Research")], ["Research"]);
-    if (change === "target") h.peer.description = "newer user edit";
+    // A touched field: scoped revision (#1791) ignores drift on untouched fields.
+    if (change === "target") h.peer.title = "newer user edit";
     if (change === "chief") h.chief.chiefOfStaff = false;
     if (change === "team") h.teams.push("Research");
     if (change === "scope") h.chief.managedSections = [];
@@ -204,7 +205,48 @@ describe("reviewed Chief team setup", () => {
     const before = structuredClone(h.store.bots);
     expect((await h.resolve(request.requestId))?.result.state).toBe("cancelled");
     expect(h.store.bots).toEqual(before); expect(h.apply).not.toHaveBeenCalled();
-    expect(h.messages[0].card?.answered).toBe("deny");
+    // The card settles as expired, not as a denial nobody made: options
+    // gone, one held line explaining that the setup must be re-proposed.
+    expect(h.messages[0].card?.expired).toBe(true);
+    expect(h.messages[0].card?.options).toEqual([]);
+    expect(h.messages[0].card?.answered).toBeUndefined();
+    expect(h.messages[0].card?.held).toBeTruthy();
+  });
+  it("applies a one-field plan despite unrelated drift on the target and the Chief", async () => {
+    const h = harness();
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: { modelSelection: { instanceId: "codex", model: "gpt-fixture" } } }]);
+    h.peer.soul = "newer user edit";
+    h.peer.description = "also newer";
+    h.chief.title = "Renamed meanwhile";
+    expect((await h.resolve(card.requestId))?.result.state).toBe("applied");
+    expect(h.peer.modelSelection).toEqual({ instanceId: "codex", model: "gpt-fixture" });
+    expect(h.peer.soul).toBe("newer user edit");
+    expect(h.chief.title).toBe("Renamed meanwhile");
+  });
+  it("still cancels when a field the plan touches drifts, on the target and on the Chief", async () => {
+    const h = harness();
+    const target = h.propose([{ action: "update", botId: h.peer.id, fields: { modelSelection: { instanceId: "codex", model: "gpt-fixture" } } }]);
+    h.peer.modelSelection = { instanceId: "claude", model: "opus" };
+    expect((await h.resolve(target.requestId))?.result).toMatchObject({ state: "cancelled", error: "@Ada changed. This setup was cancelled; review a new proposal." });
+    const chief = h.propose([{ action: "update", botId: h.chief.id, fields: { title: "Chief of Staff" } }]);
+    h.chief.title = "Owner renamed the Chief";
+    expect((await h.resolve(chief.requestId))?.result).toMatchObject({ state: "cancelled", error: "The Chief's settings changed. This setup was cancelled; review a new proposal." });
+    expect(h.apply).not.toHaveBeenCalled();
+  });
+  it("keeps a plan that never touches the Chief valid across the Chief's own drift", async () => {
+    const h = harness();
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: { title: "Researcher" } }]);
+    h.chief.soul = "Chief drifted elsewhere";
+    h.chief.modelSelection = { instanceId: "codex", model: "gpt-fixture" };
+    expect((await h.resolve(card.requestId))?.result.state).toBe("applied");
+    expect(h.peer.title).toBe("Researcher");
+  });
+  it("cancels when the section a card displayed moves, even though the plan did not change it", async () => {
+    const h = harness();
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: { title: "Researcher" } }]);
+    h.peer.section = "Engineering";
+    expect((await h.resolve(card.requestId))?.result).toMatchObject({ state: "cancelled", error: "@Ada changed. This setup was cancelled; review a new proposal." });
+    expect(h.apply).not.toHaveBeenCalled();
   });
   it("preserves existing elevated permissions and peer allowlists", () => {
     const h = harness(); h.peer.approvalMode = "full";
@@ -241,6 +283,32 @@ describe("reviewed Chief team setup", () => {
     Object.assign(h.messages[0].card!, { answered: "unavailable", dismissed: true });
     expect(await h.resolve(card.requestId)).toMatchObject({ result: { state: "cancelled" }, duplicate: true });
     expect(h.apply).not.toHaveBeenCalled();
+  });
+  it("renders a soul-only update as a SOUL.md line diff, not a JSON blob", () => {
+    const h = harness(); h.peer.soul = "Verify sources.\nCheck citations.";
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: { soul: "Verify sources.\nCheck citations and dates." } }]);
+    expect(card.detail).toContain("SOUL.md (");
+    expect(card.detail).toContain(" Verify sources.");
+    expect(card.detail).toContain("-Check citations.");
+    expect(card.detail).toContain("+Check citations and dates.");
+    expect(card.detail).not.toContain('"soul":');
+  });
+  it("labels team-setup field changes with before and after like the profile card", () => {
+    const h = harness(); h.peer.title = "Researcher";
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: {
+      title: "Research lead", section: "Engineering", modelSelection: { instanceId: "codex", model: "gpt-fixture" },
+    } }]);
+    expect(card.detail).toContain('Title: "Researcher" → "Research lead"');
+    expect(card.detail).toContain('Section: "Work" → "Engineering"');
+    expect(card.detail).toContain("Default engine/model: claude/sonnet (no variant) → codex/gpt-fixture (no variant)");
+  });
+  it("shows the model variant on the current selection and its absence on the proposed one", () => {
+    const h = harness();
+    h.peer.modelSelection = { instanceId: "claude", model: "sonnet", variant: "high" };
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: {
+      modelSelection: { instanceId: "codex", model: "gpt-fixture" },
+    } }]);
+    expect(card.detail).toContain("Default engine/model: claude/sonnet (variant high) → codex/gpt-fixture (no variant)");
   });
 });
 
@@ -302,7 +370,7 @@ describe("Full Access team setup", () => {
       .toMatchObject({ state: "cancelled", applied: false, result: { error: expect.stringContaining("turn has expired") } });
     expect(h.apply).not.toHaveBeenCalled(); expect(h.deleteBot).not.toHaveBeenCalled();
     expect(h.store.bots).toHaveLength(2);
-    expect(h.messages.every(({ card }) => card?.answered === "deny" && card.options.length === 0)).toBe(true);
+    expect(h.messages.every(({ card }) => card?.expired === true && card.options.length === 0)).toBe(true);
     expect(h.messages.every(({ card }) => !("canCommit" in card!.teamSetupRequest!))).toBe(true);
   });
 
@@ -409,7 +477,7 @@ describe("Full Access team setup", () => {
     const response = await h.submit([specialist("Mira", "Work")]);
     expect(response).toMatchObject({ state: "failed", applied: false, result: { state: "failed", bots: [], error: "fixture disk full" } });
     expect(h.store.bots).toHaveLength(2);
-    expect(h.messages[0].card).toMatchObject({ answered: "deny", options: [], teamSetupRequest: { resumed: true } });
+    expect(h.messages[0].card).toMatchObject({ expired: true, options: [], teamSetupRequest: { resumed: true } });
     expect(await h.resolve(response.requestId)).toMatchObject({ duplicate: true, result: { state: "failed" } });
     expect(h.apply).toHaveBeenCalledTimes(1);
   });

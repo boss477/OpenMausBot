@@ -7,6 +7,7 @@
 import { EffortRow, ModelPicker } from "../ModelPicker";
 import { useStore, type Bot } from "@/state/store";
 import { useBotEditor } from "./BotEditorContext";
+import { ProposalStatus } from "./ProposalStatus";
 
 export function ModelSection({ bot }: { bot: Bot }) {
   const { state } = useStore();
@@ -24,6 +25,7 @@ export function ModelSection({ bot }: { bot: Bot }) {
               <div className="mt-0.5 text-[13px] text-ink-secondary">
                 {draft ? "Starting model for the new bot and its threads." : "For groups and new threads. Also updates the selected idle thread; other existing threads keep their model."}
               </div>
+              <ProposalStatus bot={bot} kind="chief" />
             </div>
           }
         />
@@ -44,6 +46,7 @@ export function ModelSection({ bot }: { bot: Bot }) {
             <div className="mt-0.5 text-[13px] text-ink-secondary">
               {modelVariants ? (draft ? "Starting reasoning variant for the new bot." : "For groups, new threads, and the selected idle thread. Other existing threads keep their variant.") : `How hard this bot thinks in groups and new threads${bot.modelSelection.effort ? "" : " (Default: no level is sent)"}`}
             </div>
+            <ProposalStatus bot={bot} kind="chief" />
           </div>
         }
       />

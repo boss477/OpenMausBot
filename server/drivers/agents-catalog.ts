@@ -369,13 +369,14 @@ const toolDefinitions = (externalRuntime: boolean) => [
   {
     name: "post_to_room",
     description:
-      "Put one message into a shared room you belong to, for example when the user asks you to tell the team something. Get group_id from list_rooms. This posts and returns: no room member's turn starts, nobody replies, and nothing comes back except confirmation — so never use it to ask a question or hand out work (use ask_bot or delegate_bot for those). Post once, say it in full, and tell the user what you posted. If a post is refused, do not retry it: say what you wanted to post in your reply instead.",
+      "Put one message into a shared room you belong to, for example when the user asks you to tell the team something. Get group_id from list_rooms. This posts and returns: no room member's turn starts, nobody replies, and nothing comes back except confirmation — so never use it to ask a question or hand out work (use ask_bot or delegate_bot for those). Post once, say it in full, and tell the user what you posted. Set attach_voice_note true to attach this turn's voice note. If a post is refused, do not retry it: say what you wanted to post in your reply instead.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         group_id: { type: "string", description: "The room's id, copied exactly from list_rooms." },
         message: { type: "string", description: "The complete message to post, written for the room to read as it stands." },
+        attach_voice_note: { type: "boolean", description: "True to attach this turn's send_voice_note recording; the message is its caption. Call send_voice_note first." },
       },
       required: ["group_id", "message"],
     },
@@ -666,7 +667,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
   {
     name: "propose_profile",
     description:
-      "Submit user-requested changes to your own name, title, description, standing instructions (SOUL.md), or working folder (cwd). Keep SOUL.md short — who you are and the rules you never break; put step-by-step procedure into a skill instead. A Chief of Staff may pass for_bot_id (from list_bots) for a requested change to another bot in its section." + PROPOSAL_OUTCOME,
+      "Submit user-requested changes to your own name, title, description, standing instructions (SOUL.md), working folder (cwd), or your alert and voice toggles (notifications, speakReplies). Keep SOUL.md short — who you are and the rules you never break; put step-by-step procedure into a skill instead. A Chief of Staff may pass for_bot_id (from list_bots) for a requested change to another bot in its section." + PROPOSAL_OUTCOME,
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -679,6 +680,14 @@ const toolDefinitions = (externalRuntime: boolean) => [
           type: "string",
           maxLength: 1024,
           description: "Absolute path of the folder your tools read and write in (for example /Users/me/Projects/site). It must already exist. An empty string means your private workspace.",
+        },
+        notifications: {
+          type: "boolean",
+          description: "Completion and attention notifications for this bot on the host and paired clients.",
+        },
+        speakReplies: {
+          type: "boolean",
+          description: "Speak this bot's replies aloud as they settle, without being asked.",
         },
         reason: { type: "string", minLength: 1, maxLength: 500, description: "One sentence the user will see explaining why." },
         for_bot_id: {

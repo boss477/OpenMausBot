@@ -1340,7 +1340,7 @@ export function LocalComputerSection() {
               onChange={(event) => void savePolicy(status?.mode ?? "shared", Number(event.target.value))}
               className="rounded-lg border border-hairline/40 bg-control px-2.5 py-1.5 text-[13px] text-ink disabled:opacity-50"
             >
-              {[1, 2, 3, 4].map((value) => <option key={value} value={value}>{value}</option>)}
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((value) => <option key={value} value={value}>{value}</option>)}
             </select>
           </div>
         )}
@@ -1421,7 +1421,10 @@ export function LocalComputerSection() {
             ) : status?.container === "running" ? (
               <div className="flex items-center gap-2 text-[13px] text-ink-secondary"><Loader2 size={13} className="animate-spin" /> {t("vm.setup.waiting")}</div>
             ) : status?.image ? (
-              <ActionButton action="run" pending={pending} onClick={() => void act("run")}>{t("vm.setup.create")}</ActionButton>
+              <>
+                <ActionButton action="run" pending={pending} onClick={() => void act("run")}>{t("vm.setup.start")}</ActionButton>
+                <p className="text-[13px] leading-relaxed text-ink-secondary">{t("vm.setup.idleHint")}</p>
+              </>
             ) : null}
             {c?.run && <details className="text-[12px] text-ink-secondary"><summary className="cursor-pointer">{t("vm.setup.showCommand")}</summary><div className="mt-2"><CommandLine command={c.run} /></div></details>}
           </Step>

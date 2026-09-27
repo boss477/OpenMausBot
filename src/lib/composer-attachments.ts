@@ -858,9 +858,29 @@ export function composerShouldRefocus(active: FocusNode | null, input: ComposerI
   return Boolean(composer?.contains(active));
 }
 
+/**
+ * Whether a freshly opened thread's composer should take keyboard focus.
+ * Opening a thread from the sidebar leaves focus on the row or the New thread
+ * button, so the composer takes it from any plain control. It never takes it
+ * from another text field (the sidebar search, a rename) or from an open
+ * dialog, where the person is typing or deciding something else.
+ */
+export function composerTakesFocusOnOpen(active: OpenFocusNode | null, input: ComposerInputNode): boolean {
+  if (composerShouldRefocus(active, input)) return true;
+  if (!active) return true;
+  const tag = active.tagName?.toUpperCase();
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || active.isContentEditable) return false;
+  return !active.closest?.("[role=dialog], [role=alertdialog], [aria-modal=true]");
+}
+
 // This file is also compiled for the server, which has no DOM types; the rule
 // only needs these members of the real elements.
 type FocusNode = object;
+interface OpenFocusNode {
+  tagName?: string;
+  isContentEditable?: boolean;
+  closest?(selector: string): object | null;
+}
 interface ComposerInputNode {
   ownerDocument: { body: FocusNode | null; documentElement: FocusNode | null };
   closest(selector: string): { contains(node: FocusNode | null): boolean } | null;

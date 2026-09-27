@@ -8,13 +8,14 @@ import type { ModelPicker } from "./ModelPicker";
 const fixture = vi.hoisted(() => {
   vi.stubGlobal("window", {});
   vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {} });
-  return { dispatch: vi.fn(), platform: "other", localReasonCode: "cua-driver-unavailable", localMessage: "", model: null as ComponentProps<typeof ModelPicker> | null,
+  return { dispatch: vi.fn(), showToolCalls: false, platform: "other", localReasonCode: "cua-driver-unavailable", localMessage: "", model: null as ComponentProps<typeof ModelPicker> | null,
     approval: null as ComponentProps<typeof ApprovalModeSelector> | null };
 });
 vi.mock("@/state/store", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/state/store")>();
   return { ...original, useStore: () => ({
-    state: { ...original.initialState, instances: [{ instanceId: "test", driverKind: "codex", displayName: "Test" } as InstanceInfo] },
+    state: { ...original.initialState, config: fixture.showToolCalls ? { features: { showToolCalls: true } } : null,
+      instances: [{ instanceId: "test", driverKind: "codex", displayName: "Test" } as InstanceInfo] },
     dispatch: fixture.dispatch,
   }) };
 });
@@ -99,6 +100,27 @@ describe("thread control placement", () => {
     expect(render()).toContain("Retry</button>");
     messages.push({ id: "next", role: "user", kind: "text", at: 4, text: "A different request" });
     expect(render()).not.toContain("Retry</button>");
+  });
+  it.each([false, true])("keeps recovery visible and outside tool folds when tool calls are %s", (showToolCalls) => {
+    fixture.showToolCalls = showToolCalls;
+    const explanation = "Automatic recovery: Qwen could not start. Trying Backup · fixture-model once in this thread.";
+    const messages: Bot["messages"] = [
+      { id: "read", role: "bot", kind: "activity", at: 1, tool: { name: "Read", ok: true } },
+      { id: "edit", role: "bot", kind: "activity", at: 2, tool: { name: "Edit", ok: true } },
+      { id: "recovery", role: "bot", kind: "activity", at: 3, tool: { name: `recovery: ${explanation}`, ok: true } },
+      { id: "bash", role: "bot", kind: "activity", at: 4, tool: { name: "Bash", ok: true } },
+      { id: "write", role: "bot", kind: "activity", at: 5, tool: { name: "Write", ok: true } },
+    ];
+    try {
+      const markup = renderToStaticMarkup(createElement(ChatView, { bot: { ...bot, busy: false, messages } }));
+      expect(markup).toContain('data-mid="recovery"><div role="status"');
+      expect(markup).toContain(explanation);
+      expect(markup).not.toContain(`recovery: ${explanation}`);
+      expect(markup.match(/Automatic recovery:/g)).toHaveLength(1);
+      if (!showToolCalls) expect(markup).not.toContain('data-testid="tool-activity"');
+    } finally {
+      fixture.showToolCalls = false;
+    }
   });
   it("offers the matching macOS Settings and relaunch actions only for a named CUA permission failure", () => {
     fixture.platform = "darwin";

@@ -1798,6 +1798,28 @@ export class Store {
     return result;
   }
 
+  /** One reviewed default-model change (propose_model): task stamping is
+   * identical to applyTeamSetup's update branch — saved per-thread
+   * selections are never rewritten, and a thread with no selection of its
+   * own is pinned to the previous default so it does not silently follow
+   * the new one. */
+  applyModelDefault(id: string, modelSelection: ModelSelection): BotRecord | null {
+    const previous = this.bot(id);
+    if (!previous) return null;
+    const next: BotRecord = { ...previous, modelSelection: structuredClone(modelSelection) };
+    next.tasks = previous.tasks?.map((task) => ({
+      ...task,
+      modelSelection: structuredClone(task.modelSelection ?? previous.modelSelection),
+      approvalMode: approvalModeFor(this.projectBotForTask(previous.id, task.threadId)!),
+      autoApprove: task.autoApprove ?? previous.autoApprove,
+      alwaysAllow: structuredClone(task.alwaysAllow ?? previous.alwaysAllow ?? []),
+    }));
+    this.saveBots(this.bots.map((candidate) => candidate.id === id ? next : candidate));
+    this.bots = this.bots.map((candidate) => candidate.id === id ? next : candidate);
+    this.emit({ type: "bot", botId: id });
+    return next;
+  }
+
   deleteBot(id: string, setupRequest?: TeamSetupRequest): boolean {
     const bot = this.bot(id);
     if (!bot) return false;

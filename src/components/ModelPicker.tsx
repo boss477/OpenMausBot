@@ -1,6 +1,8 @@
 // Compact model picker: providers live on a Cloud/Local rail. Ready engines
 // show a short suggested list with search and an explicit all-models view;
-// unconfigured engines remain in Settings instead of cluttering the picker.
+// an installed engine that needs sign-in, or the bot's own engine when it
+// needs setup, shows one focused action instead of a disabled wall. Engines
+// that are not installed and not in use stay in Settings.
 // Reasoning effort rides along (EffortRow): model and effort are one choice to
 // the person making it, so the chat header and the settings dialog render the
 // same row and write through the same action.
@@ -35,6 +37,41 @@ export function engineStatus(instance: InstanceInfo): string {
   if (needsCli(instance)) return t("model.setupRequired");
   if (needsSignIn(instance)) return t("model.signInRequired");
   return instance.snapshot.version ?? t("model.ready");
+}
+
+/** How long "Looking for local models…" may stay up. Opening the local list
+ * re-probes local servers, and the answer rides on an engine status check
+ * that can be slow; after this the list shows what it has, and a late answer
+ * still lands when it arrives. */
+export const LOCAL_PROBE_TIMEOUT_MS = 5_000;
+
+/** Local servers (Ollama, LM Studio…) are otherwise probed only at startup,
+ * after sign-in, or on refresh, so a model started since then would stay
+ * invisible. Resolves when the refresh settles or the timeout passes, never
+ * rejects: an offline app keeps its last known catalog. */
+export function probeLocalModels(
+  instanceId: string,
+  refreshModels: (instanceId: string) => Promise<void>,
+  timeoutMs = LOCAL_PROBE_TIMEOUT_MS,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    void refreshModels(instanceId)
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+  });
+}
+
+/** Whether the rail's engine offers the way into local models. Claude runs
+ * them through its own CLI, signed in or not, so its entry stays while none
+ * have been found yet: opening it is what looks again. Other engines offer it
+ * once they list a local model. */
+export function offersLocalModels(instance: InstanceInfo | undefined, localCount: number): boolean {
+  if (!instance) return false;
+  return localCount > 0 || (instance.driverKind === "claudeAgent" && !needsCli(instance) && !instance.policy);
 }
 
 /** The others capitalize cleanly; "xhigh" would read "Xhigh". */
@@ -346,6 +383,7 @@ export function ModelPicker({
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [probingLocal, setProbingLocal] = useState<string | null>(null);
   const [scope, setScope] = useState<"bot" | "thread">("thread");
   const [pendingSwitch, setPendingSwitch] = useState<{ botId: string; threadId: string;
     selection: ModelSelection; updateBotDefault: boolean; name: string } | null>(null);
@@ -355,7 +393,7 @@ export function ModelPicker({
 
   const selection = bot.modelSelection;
   const active = state.instances.find((instance) => instance.instanceId === selection.instanceId);
-  const pickerInstances = configuredModelInstances(state.instances);
+  const pickerInstances = configuredModelInstances(state.instances, selection.instanceId);
   const selectedVariantLabel = selection.variant === undefined ? undefined : variantLabel(
     active?.models.options.find((option) => option.id === selection.model)?.variants?.find((option) => option.id === selection.variant)
       ?? { id: selection.variant, label: selection.variant },
@@ -454,6 +492,15 @@ export function ModelPicker({
     resetList();
   };
 
+  const openLocalModels = (instance: InstanceInfo) => {
+    setPane("custom");
+    resetList();
+    if (needsCli(instance) || instance.policy || probingLocal === instance.instanceId) return;
+    setProbingLocal(instance.instanceId);
+    void probeLocalModels(instance.instanceId, refreshInstanceModels).then(() =>
+      setProbingLocal((current) => (current === instance.instanceId ? null : current)));
+  };
+
   const selectRail = (instance: InstanceInfo) => {
     if (instance.driverKind === "claudeAgent") lastClaudeIdRef.current = instance.instanceId;
     setRailId(instance.instanceId);
@@ -503,6 +550,13 @@ export function ModelPicker({
     : false;
   const canOpenCustom = Boolean(railInstance && !needsCli(railInstance));
   const canReturnToOfficial = official.length > 0 && !isCustomOnly(railInstance);
+  const lookingForLocal = Boolean(railInstance && probingLocal === railInstance.instanceId);
+  const lookingForLocalStatus = (
+    <span role="status" className="flex items-center justify-center gap-2">
+      <Loader2 size={12} className="animate-spin" aria-hidden="true" />
+      {t("model.lookingLocal")}
+    </span>
+  );
 
   const renderRow = (option: ModelOption) => (
     <ModelRow
@@ -767,6 +821,9 @@ export function ModelPicker({
                         </>
                       ) : (
                         <>
+                          {lookingForLocal && custom.length > 0 && (
+                            <div className="flex px-2 pb-1.5 pt-0.5 text-[11.5px] text-ink-secondary">{lookingForLocalStatus}</div>
+                          )}
                           {pinned.length > 0 && (
                             <EngineGroupLabel className="px-2 pb-1 pt-0.5">{t("model.loadedNow")}</EngineGroupLabel>
                           )}
@@ -777,10 +834,16 @@ export function ModelPicker({
                           {rest.map(renderRow)}
                           {custom.length === 0 && (
                             <div className="mx-1 rounded-xl border border-dashed border-hairline/50 px-3 py-5 text-center">
-                              <div className="text-[12.5px] font-medium text-ink">{t("model.noLocal")}</div>
-                              <div className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">
-                                {t("model.noLocalHint")}
-                              </div>
+                              {lookingForLocal ? (
+                                <div className="text-[12.5px] text-ink-secondary">{lookingForLocalStatus}</div>
+                              ) : (
+                                <>
+                                  <div className="text-[12.5px] font-medium text-ink">{t("model.noLocal")}</div>
+                                  <div className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">
+                                    {t("model.noLocalHint")}
+                                  </div>
+                                </>
+                              )}
                             </div>
                           )}
                           {custom.length > 0 && filteredCustom.length === 0 && (
@@ -811,19 +874,17 @@ export function ModelPicker({
                   />
                 )}
 
-                {pane === "main" && custom.length > 0 && (
+                {pane === "main" && offersLocalModels(railInstance, custom.length) && (
                   <button
                     type="button"
+                    data-model-local-entry
                     aria-label={
                       custom.length > 0
                         ? t("model.useLocalCount", { count: custom.length })
                         : t("model.useLocal")
                     }
                     disabled={!canOpenCustom}
-                    onClick={() => {
-                      setPane("custom");
-                      resetList();
-                    }}
+                    onClick={() => openLocalModels(railInstance)}
                     className="flex w-full shrink-0 items-center justify-between gap-2 border-t border-hairline/40 px-4 py-3 text-left text-[12.5px] font-medium text-ink hover:bg-control/60 disabled:cursor-not-allowed disabled:text-ink-secondary/40 disabled:hover:bg-transparent"
                   >
                     <span>{t("model.useLocal")}</span>

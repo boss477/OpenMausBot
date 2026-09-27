@@ -279,7 +279,7 @@ struct VoiceNoteBubble: View {
             }
             loading = false
         }
-        .onChange(of: player.isPlaying) { _, playing in
+        .onValueChange(of: player.isPlaying) { playing in
             if !playing { VoiceNoteCenter.shared.release(player) }
         }
         .onDisappear {

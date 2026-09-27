@@ -121,7 +121,7 @@ turn off saved remote access; use \`--local\` for that on a new launch.
 With a custom \`--data-dir\` or \`--port\`, keep using those options when
 starting and pairing.
 
-API services include OpenAI, OpenRouter, Groq, Requesty, and compatible
+API services include OpenAI, OpenRouter, Groq, and compatible
 endpoints.
 API connections currently support chat only. Setup asks before a short,
 potentially billable API test; native setup confirms sign-in, with model

@@ -17,6 +17,7 @@ import type { CredentialTargetId } from "./credential-request.ts";
 import type { TeamSetupRequest } from "./team-setup.ts";
 import type { RoutineRequestCardData } from "./routine-request.ts";
 import type { ProfileRequestCardData } from "./profile-request.ts";
+import type { ModelRequestCardData } from "./model-request.ts";
 import type { TighteningRequestCardData } from "./tightening-request.ts";
 import type { SkillRequestCardData } from "./skill-request.ts";
 import type { QuestionRequestCardData } from "./ask-question.ts";
@@ -362,9 +363,12 @@ export interface WireMessage {
     by: "person" | "harness";
   };
   /** Durable provider output stored by the harness; renderers receive only
-   * the allowlisted /api/attachments URL. */
+   * the allowlisted /api/attachments URL. `file` entries are documents, audio
+   * and video a bot attached with attach_file; they are opened through the
+   * message-scoped file route, never by path. */
   attachments?: Array<
     | { kind: "image"; path: string; mime: string }
+    | { kind: "file"; path: string; mime: string; name: string }
     | { kind: "audio"; path: string; mime: string; durationMs?: number }
   >;
   card?: OptionCardData;
@@ -388,6 +392,11 @@ export interface WireMessage {
   };
   /** user messages sent INTO a running turn (capabilities.queueing). */
   steered?: boolean;
+  /** user messages a peer bot handed to this thread's RUNNING turn through
+   * the non-interrupting aside lane: peer context folded in mid-turn, never
+   * a new request. The text is stored enveloped exactly as injected, so any
+   * later reader sees the sender and the not-steering framing. */
+  aside?: boolean;
   /** A user-role message that arrived through the server's HTTP API. */
   via?: "api";
   /** Which person sent this user message, when the workspace has more than
@@ -478,6 +487,8 @@ export interface OptionCardData {
   routineRequest?: RoutineRequestCardData;
   /** A durable profile-change proposal (propose_profile). */
   profileRequest?: ProfileRequestCardData;
+  /** A durable default-model proposal (propose_model). */
+  modelRequest?: ModelRequestCardData;
   /** A durable authority-tightening proposal (propose_tightening). */
   tighteningRequest?: TighteningRequestCardData;
   teamSetupRequest?: TeamSetupRequest;

@@ -10,6 +10,7 @@ import { isAbsolute, join, parse, posix, relative, resolve, win32 } from "node:p
 import { homedir } from "node:os";
 import { backup, DatabaseSync } from "node:sqlite";
 import { pipeline } from "node:stream/promises";
+import { Worker } from "node:worker_threads";
 import * as tar from "tar";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { writeFileAtomic } from "./atomic.ts";
@@ -58,6 +59,7 @@ export interface CreateWorkspaceBackupOptions {
   clientState?: WorkspaceBackupClientState;
   appVersion?: string;
 }
+type CreatedWorkspaceBackup = { id: string; path: string; summary: WorkspaceBackupSummary };
 export interface WorkspaceRestoreResult {
   restored: boolean;
   rolledBack?: boolean;
@@ -106,8 +108,7 @@ function jobPath(dataDir: string, id: string): string {
   }
   return path;
 }
-function newJob(dataDir: string): { id: string; directory: string } {
-  const id = randomUUID();
+function newJob(dataDir: string, id: string = randomUUID()): { id: string; directory: string } {
   const directory = jobPath(dataDir, id);
   mkdirSync(directory, { mode: 0o700 });
   return { id, directory };
@@ -254,12 +255,45 @@ function databaseCounts(path: string): { threads: number; messages: number } {
   } finally { db.close(); }
 }
 
-export async function createWorkspaceBackup(dataDir: string, options: CreateWorkspaceBackupOptions) {
+/** The existing maintenance gate owns exclusivity until this worker has exited.
+ * Keep synchronous file validation/fsync intact, but off the request thread. */
+export async function createWorkspaceBackup(dataDir: string, options: CreateWorkspaceBackupOptions): Promise<CreatedWorkspaceBackup> {
+  const source = new URL("./workspace-backup.worker.ts", import.meta.url);
+  // Assign ownership before the worker can create staging, including crashes
+  // too early to send a job-created message back to this process.
+  const jobId = randomUUID();
+  let worker: Worker | undefined;
+  let completed = false;
+  try {
+    worker = new Worker(existsSync(source) ? source : new URL("./workspace-backup.worker.js", import.meta.url), {
+      workerData: { dataDir, options, jobId }, execArgv: [],
+    });
+    const result = await new Promise<CreatedWorkspaceBackup>((resolveBackup, reject) => {
+      const failed = () => reject(new Error("The backup worker stopped before completing. Try again."));
+      worker!.once("message", (reply: { result?: CreatedWorkspaceBackup; error?: string }) => {
+        if (reply.result) resolveBackup(reply.result);
+        else if (reply.error) reject(new Error(reply.error));
+        else failed();
+      });
+      worker!.once("error", failed);
+      worker!.once("exit", failed);
+    });
+    completed = true;
+    return result;
+  } finally {
+    await worker?.terminate();
+    // Reuse the guarded deletion path: never sweep other jobs or recovery.
+    if (!completed && entryExists(join(dataDir, ".backups", jobId))) removeWorkspaceBackupJob(dataDir, jobId);
+  }
+}
+
+/** Worker implementation; application callers use createWorkspaceBackup. */
+export async function createWorkspaceBackupSnapshot(dataDir: string, options: CreateWorkspaceBackupOptions, jobId?: string): Promise<CreatedWorkspaceBackup> {
   if (Object.hasOwn(options, "credentials")) throw new Error("Workspace backups do not transfer credentials.");
   assertLocalAuthOutsideSnapshot(dataDir);
   const salt = randomBytes(16);
   const key = await passwordKey(options.password, salt);
-  const job = newJob(dataDir);
+  const job = newJob(dataDir, jobId);
   const snapshot = join(job.directory, "snapshot");
   folder(join(snapshot, "data"));
   const entries: Entry[] = [];

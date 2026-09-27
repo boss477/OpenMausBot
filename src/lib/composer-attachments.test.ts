@@ -21,6 +21,7 @@ import {
   splitTranscriptAttachments,
   type ImageAttachment,
   composerShouldRefocus,
+  composerTakesFocusOnOpen,
 } from "./composer-attachments";
 
 /** Exercises the spacing and empty-draft cases for pasted text insertion. */
@@ -711,5 +712,62 @@ describe("composerShouldRefocus", () => {
 
   it("leaves focus alone when the writer moved elsewhere", () => {
     expect(composerShouldRefocus(el(sidebar), input)).toBe(false);
+  });
+});
+
+describe("composerTakesFocusOnOpen", () => {
+  // no DOM here either: plain objects stand in for the Element members read
+  type Fake = {
+    parent?: Fake;
+    role?: string;
+    tagName?: string;
+    isContentEditable?: boolean;
+    closest: (sel: string) => Fake | null;
+    contains: (el: unknown) => boolean;
+  };
+  const node = (props: Omit<Fake, "closest" | "contains">): Fake => {
+    const self: Fake = {
+      ...props,
+      closest: (sel) => {
+        for (let cur: Fake | undefined = self; cur; cur = cur.parent) {
+          if (sel === "[data-tour=composer]" && cur.role === "composer") return cur;
+          if (sel.includes("[role=dialog]") && cur.role === "dialog") return cur;
+        }
+        return null;
+      },
+      contains: (el) => {
+        for (let cur = el as Fake | undefined; cur; cur = cur.parent) if (cur === self) return true;
+        return false;
+      },
+    };
+    return self;
+  };
+  const html = node({ tagName: "HTML" });
+  const body = node({ tagName: "BODY", parent: html });
+  const composer = node({ tagName: "DIV", role: "composer", parent: body });
+  const sidebar = node({ tagName: "NAV", parent: body });
+  const input = Object.assign(node({ tagName: "TEXTAREA", parent: composer }), {
+    ownerDocument: { body, documentElement: html },
+  });
+
+  it("takes focus from the thread row or New thread button that opened the thread", () => {
+    expect(composerTakesFocusOnOpen(node({ tagName: "DIV", parent: sidebar }), input)).toBe(true);
+    expect(composerTakesFocusOnOpen(node({ tagName: "BUTTON", parent: sidebar }), input)).toBe(true);
+  });
+
+  it("takes focus when nothing else holds it", () => {
+    expect(composerTakesFocusOnOpen(null, input)).toBe(true);
+    expect(composerTakesFocusOnOpen(body, input)).toBe(true);
+  });
+
+  it("leaves another text field alone, such as the sidebar search or a rename", () => {
+    expect(composerTakesFocusOnOpen(node({ tagName: "INPUT", parent: sidebar }), input)).toBe(false);
+    expect(composerTakesFocusOnOpen(node({ tagName: "TEXTAREA", parent: sidebar }), input)).toBe(false);
+    expect(composerTakesFocusOnOpen(node({ tagName: "DIV", isContentEditable: true, parent: sidebar }), input)).toBe(false);
+  });
+
+  it("leaves an open dialog alone", () => {
+    const dialog = node({ tagName: "DIV", role: "dialog", parent: body });
+    expect(composerTakesFocusOnOpen(node({ tagName: "BUTTON", parent: dialog }), input)).toBe(false);
   });
 });

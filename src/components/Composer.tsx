@@ -39,6 +39,7 @@ import {
   clipboardImageFiles,
   composeMessage,
   composerShouldRefocus,
+  composerTakesFocusOnOpen,
   imageAttachmentFromFile,
   intakeFiles,
   isLongPaste,
@@ -236,6 +237,20 @@ export function Composer({
       input.focus();
       input.setSelectionRange(at, at);
     });
+  }, []);
+  // The composer is keyed by thread, so mounting means a thread was just
+  // opened: put the caret at the end of its draft so the person can type
+  // without clicking the box first. Touch screens are skipped — focusing
+  // there pops the on-screen keyboard over the conversation.
+  useEffect(() => {
+    if (window.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
+    const frame = requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input || input.disabled || !composerTakesFocusOnOpen(document.activeElement, input)) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+    return () => cancelAnimationFrame(frame);
   }, []);
   const mentionListRef = useRef<HTMLDivElement>(null);
   // what was typed before the mic went on — partials append after it

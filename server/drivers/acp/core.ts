@@ -60,7 +60,7 @@ import type {
   RequestOutcome,
   TurnImageInput,
 } from "../../contracts.ts";
-import { newEventId, newId } from "../../contracts.ts";
+import { newEventId, newId, TurnNotStartedError } from "../../contracts.ts";
 import { augmentedPath } from "../../env-path.ts";
 import { supportsApprovalMode } from "../../../shared/approval-mode.ts";
 import { parseAskQuestions, parseChoices, questionAnswersByQuestion } from "../../../shared/ask-question.ts";
@@ -72,6 +72,7 @@ import { extractMcpImages } from "../../mcp-tool-images.ts";
 import { redactSecretsInText } from "../../redact.ts";
 import { recoveryPromptFor } from "../../resume-recovery.ts";
 import { sessionIdlePolicy } from "../session-idle.ts";
+import { classifyError } from "../retry.ts";
 
 /** ACP vendors put the actionable cause in error.data while keeping the
  * JSON-RPC message generic. Only surface known text fields, never a response
@@ -124,8 +125,13 @@ interface AcpTurn {
   turn: SendTurnInput;
   turnConfig: AcpConfig;
   controlsHost: boolean;
-  state: { settled: boolean; promptSent: boolean; text: string; producedItem: boolean };
+  state: { settled: boolean; promptSent: boolean; text: string; producedItem: boolean; startupActivity: boolean; stopped: boolean };
+  acknowledge: () => void;
   asks: Map<string, AcpAskFinish>;
+  /** Tool calls the agent started and has not yet reported finished. A tool
+   * such as `sleep` or a quiet build sends nothing while it runs, so the
+   * prompt's silence watchdog waits for these as it does for asks. */
+  runningTools: Set<string>;
   interruptTimer: ReturnType<typeof setTimeout> | null;
   flushAssistantText: () => void;
   /** fold a session config snapshot into sessionConfigResult + the picker */
@@ -254,6 +260,8 @@ export interface AcpSupport {
   ): Promise<ProviderSnapshot>;
   /** Google Antigravity resumes through session/resume, not session/load. */
   resumeMethod?: "load" | "resume";
+  /** Some agents acknowledge a live load without applying new MCP credentials. */
+  restartOnMcpChange?: boolean;
   /** Route workspace file access through ACP so edits retain approval cards. */
   clientFileSystem?: boolean;
   /** Do not retain stderr from providers that may place OAuth material there. */
@@ -316,6 +324,9 @@ const INIT_TIMEOUT = envOr("OPENMAUS_ACP_INIT_TIMEOUT_MS", 300_000);
 const SESSION_CONFIG_TIMEOUT = envOr("OPENMAUS_ACP_SESSION_CONFIG_TIMEOUT_MS", 300_000); // configureSession's per-request default
 const NEW_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_NEW_SESSION_TIMEOUT_MS", 300_000);
 const LOAD_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_LOAD_SESSION_TIMEOUT_MS", 120_000); // history replay on a long thread is slow
+/** ACP agents may compact their own history without telling the client;
+ * re-send the full prompt after this many bare turns as a backstop. */
+const ACP_PROMPT_RE_ANCHOR_TURNS = 8;
 // Read lazily (not at import) so a test can shorten the window. Unlike the
 // setup calls above, session/prompt legitimately streams for minutes, so a
 // wall-clock deadline would false-positive: this guard only trips when the
@@ -329,6 +340,17 @@ const promptIdleTimeoutMs = (): number => {
   const ms = Number(raw);
   return Number.isFinite(ms) && ms > 0 ? ms : 0;
 };
+/** Keep a turn's set of running tool calls in step with the agent's
+ * `tool_call` / `tool_call_update` notifications: a call is running from
+ * the first update that is not terminal until one that is. A `tool_call`
+ * without a status is pending (ACP's default); a `tool_call_update` without
+ * one leaves the call as it was. */
+function trackRunningTool(current: AcpTurn, update: { toolCallId?: unknown; status?: unknown }, defaultStatus?: "pending"): void {
+  if (typeof update.toolCallId !== "string" || !update.toolCallId) return;
+  const status = update.status ?? defaultStatus;
+  if (status === "completed" || status === "failed") current.runningTools.delete(update.toolCallId);
+  else if (status === "pending" || status === "in_progress") current.runningTools.add(update.toolCallId);
+}
 const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
 function acpVariantOption(result: any): { configId: string; options: ModelVariantOption[]; currentValue?: string } | undefined {
@@ -535,6 +557,21 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       // contract prompts the live session instead of paying the handshake
       // again. An idle session closes after SESSION_IDLE_MS of quiet.
       const sessions = new Map<string, AcpSession>();
+      // Closing removes a session from the pool, not its native writer lease.
+      // Retain every closing Qwen child until its process tree is gone, even
+      // when Stop or a failed turn lets another turn start during cleanup.
+      const retiring = new Map<string, Set<ReturnType<typeof spawnCli>>>();
+      const retireChild = async (threadId: string, child: ReturnType<typeof spawnCli>): Promise<boolean> => {
+        let children = retiring.get(threadId);
+        if (!children) retiring.set(threadId, children = new Set());
+        children.add(child);
+        const stopped = await killCliTree(child);
+        if (stopped) {
+          children.delete(child);
+          if (!children.size && retiring.get(threadId) === children) retiring.delete(threadId);
+        }
+        return stopped;
+      };
       const { idleMs: SESSION_IDLE_MS } = sessionIdlePolicy("ACP");
 
       const closeSession = (threadId: string, why: string) => {
@@ -546,15 +583,18 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         // a new turn must never adopt a closing session
         sessions.delete(threadId);
         session.acp.close();
-        // stdin EOF asks the agent to exit; EOF is not a guaranteed exit
-        // signal for ACP agents, so insist after a grace period
+        // EOF is not a guaranteed exit signal. Qwen must be tracked before
+        // another turn can resume its history; other agents keep their grace.
         try {
           session.child.stdin.end();
         } catch {}
-        const kill = setTimeout(() => {
-          void killCliTree(session.child);
-        }, 5_000);
-        kill.unref?.();
+        if (support.restartOnMcpChange) void retireChild(threadId, session.child);
+        else {
+          const kill = setTimeout(() => {
+            void killCliTree(session.child);
+          }, 5_000);
+          kill.unref?.();
+        }
       };
       const armIdle = (threadId: string) => {
         const session = sessions.get(threadId);
@@ -685,6 +725,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         const current = session.current;
         if (!current || current.state.settled) return;
         current.state.settled = true;
+        current.acknowledge();
         if (current.interruptTimer) clearTimeout(current.interruptTimer);
         for (const finish of current.asks.values()) finish("cancel", "system");
         session.acp.failAll(new Error("turn settled"));
@@ -790,8 +831,9 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               if (!(idleMs && idleMs > 0)) return;
               if (idleTimer) clearTimeout(idleTimer);
               idleTimer = setTimeout(() => {
-                // Waiting for a person is not an unresponsive agent.
-                if (session.current?.asks.size) { armIdle(); return; }
+                // Waiting for a person, or for a tool the agent is running,
+                // is not an unresponsive agent.
+                if (session.current?.asks.size || session.current?.runningTools.size) { armIdle(); return; }
                 rpcPending.delete(id);
                 const error = new Error(idleMessage ?? `${method} stopped responding`);
                 Object.assign(error, { acpPromptStall: true });
@@ -902,6 +944,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         // server→client permission request → canonical request.opened,
         // answered fail-closed for the running turn
         const handleServerRequest = (msg: any, current: AcpTurn) => {
+          current.state.startupActivity = true;
           if (msg.method === "fs/read_text_file" || msg.method === "fs/write_text_file") {
             void handleClientFileRequest(msg);
             return;
@@ -1046,6 +1089,9 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             if (current && !current.state.settled && session.sessionId && p.sessionId === session.sessionId) current.receiveModelVariants(p.update);
             return;
           }
+          if (current && ["agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"].includes(p.update?.sessionUpdate)) {
+            current.state.startupActivity = true;
+          }
           if (!current || !current.state.promptSent) return;
           const u = p.update ?? {};
           switch (u.sessionUpdate) {
@@ -1077,6 +1123,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             }
             case "tool_call": {
               current.flushAssistantText();
+              trackRunningTool(current, u, "pending");
               emit({
                 ...base(threadId, current.turnId),
                 type: "item.started",
@@ -1089,6 +1136,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               break;
             }
             case "tool_call_update": {
+              trackRunningTool(current, u);
               if (u.status === "completed" || u.status === "failed") {
                 current.state.producedItem = true;
                 emit({
@@ -1268,8 +1316,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         // transformEnv-policy supports (opencode). mcpServers are session
         // establishment inputs — they ride session/new and session/load over
         // the wire — and the harness mints fresh integration bearer tokens
-        // every turn, so they must not respawn the process; a change instead
-        // re-establishes the session below (see sessionKey).
+        // every turn. Most agents apply changes on live load; those that cache
+        // the old MCP clients must resume on a fresh process (see sessionKey).
         // The env the spawned child actually receives is part of the
         // contract too, and arrives hashed as envFingerprint for the same
         // reason.
@@ -1289,7 +1337,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         }
         const pooled = sessions.get(threadId);
         let session: AcpSession;
-        if (pooled && !pooled.dead && !pooled.closing && pooled.contractKey === contractKey) {
+        if (pooled && !pooled.dead && !pooled.closing && pooled.contractKey === contractKey
+            && (!support.restartOnMcpChange || pooled.sessionKey === sessionKey)) {
           // adoption cancels the idle countdown — a running turn is not quiet
           if (pooled.idleTimer) clearTimeout(pooled.idleTimer);
           pooled.idleTimer = null;
@@ -1317,7 +1366,13 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         ): Promise<any> =>
           session.acp.request(method, params, timeoutMs, receive, idleMs, idleMessage);
 
-        const state = { settled: false, promptSent: false, text: "", producedItem: false };
+        const state = { settled: false, promptSent: false, text: "", producedItem: false, startupActivity: false, stopped: false };
+        let acknowledge = () => {};
+        let rejectStartup = (_error: TurnNotStartedError) => {};
+        const startupAck = turn.startupRecovery ? new Promise<{ turnId: string }>((resolve, reject) => {
+          acknowledge = () => resolve({ turnId });
+          rejectStartup = reject;
+        }) : null;
         const asks = new Map<string, AcpAskFinish>();
         const modelOf = (result: any): string | null => {
           const option = (Array.isArray(result?.configOptions) ? result.configOptions : []).find(
@@ -1364,13 +1419,16 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           turnConfig,
           controlsHost,
           state,
+          acknowledge,
           asks,
+          runningTools: new Set(),
           interruptTimer: null,
           flushAssistantText,
           receiveModelVariants,
         };
 
         const interrupt = () => {
+          state.stopped = true;
           if (session.sessionId) {
             session.acp.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: session.sessionId } });
             if (current.interruptTimer) clearTimeout(current.interruptTimer);
@@ -1385,7 +1443,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             closeSession(threadId, "stop");
           }
         };
-        active.set(threadId, { stop: () => closeSession(threadId, "stop"), interrupt, turnId, asks });
+        active.set(threadId, { stop: () => { state.stopped = true; closeSession(threadId, "stop"); }, interrupt, turnId, asks });
         emit({ ...base(threadId, turnId), type: "turn.started" });
         session.current = current;
 
@@ -1397,6 +1455,17 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             // Returns whether this runtime accepts image prompts, for the
             // prompt phase below.
             const handshake = async (): Promise<boolean> => {
+              // Also covers timeout/reset/re-establishment, not just rotated
+              // MCP credentials. Stop remains wired while cleanup is pending.
+              for (const child of retiring.get(threadId) ?? []) {
+                const stopped = await retireChild(threadId, child);
+                if (state.settled || session.closing) throw new Error("session closed");
+                if (!stopped) {
+                  closeSession(threadId, "replace-failed");
+                  throw new Error(`${support.displayName} could not close its previous tool session. Try again.`);
+                }
+              }
+              if (state.settled || session.closing) throw new Error("session closed");
               if (!session.initResult) {
                 session.initResult = await request(
                   "initialize",
@@ -1626,6 +1695,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 promptTurn.system,
                 promptTurn.text,
                 Boolean(turn.mentionTurn),
+                ACP_PROMPT_RE_ANCHOR_TURNS,
               );
               promptInput = { ...promptTurn, system: "", text: composed.text };
               pendingSplitReceipt = { key: receiptKey, receipt: composed.receipt };
@@ -1644,7 +1714,9 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             if (turn.variant !== undefined && requestedVariantOption().currentValue !== turn.variant) {
               throw new Error(`${support.displayName} changed variant before the prompt`);
             }
+            if (state.settled || state.stopped || session.closing) throw new Error("turn stopped");
             state.promptSent = true;
+            acknowledge();
             const promptIdleMs = promptIdleTimeoutMs();
             const result = await request(
               "session/prompt",
@@ -1652,8 +1724,8 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               undefined,
               undefined,
               promptIdleMs,
-              `${DRIVER_KIND} went fully silent ${Math.round(promptIdleMs / 1000)} s after the message and the turn was stopped. ` +
-                "Raise OPENMAUS_ACP_PROMPT_IDLE_TIMEOUT_MS if this model legitimately takes longer to answer.",
+              `${DRIVER_KIND} sent nothing for ${Math.round(promptIdleMs / 1000)} s with no tool running, so the turn was stopped as stuck. ` +
+                "Send the message again to retry. On a self-hosted server, OPENMAUS_ACP_PROMPT_IDLE_TIMEOUT_MS sets this limit (0 turns it off).",
               );
             if (pendingSplitReceipt) {
               // session/prompt resolving is the acceptance boundary: a
@@ -1697,6 +1769,32 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               // fallback for existing ACP supports.
               const needsAuth = code === "invalid_credentials" || code === "inactive_subscription"
                 || message === support.loginNote;
+              const failure = classifyError({ text: message });
+              const transientStartup = failure.transient || (failure.reason === "unknown" && code === "upstream_outage");
+              const denied = /\b(?:(?:permission|access) denied|(?:approval|permission) (?:required|denied|rejected)|requires? (?:approval|permission)|policy (?:restriction|violation)|(?:blocked|denied|restricted) by (?:the )?policy)\b/i.test(message);
+              if (turn.startupRecovery && transientStartup && !needsAuth && !denied && (!code || code === "upstream_outage")
+                  && ![-32700, -32600, -32601, -32602].includes((e as any)?.code)
+                  && !state.promptSent && !state.startupActivity && !state.producedItem && !state.text
+                  && !state.stopped && !session.closing && !asks.size && !current.runningTools.size) {
+                // Quiesce before killing: the child's close event must not
+                // publish a terminal completion before the harness can recover.
+                state.settled = true;
+                session.current = null;
+                if (current.interruptTimer) clearTimeout(current.interruptTimer);
+                closeSession(threadId, "startup-recovery");
+                const stopped = await killCliTree(session.child).catch(() => false);
+                if (current.interruptTimer) clearTimeout(current.interruptTimer);
+                active.delete(threadId);
+                if (stopped && !state.stopped) {
+                  rejectStartup(new TurnNotStartedError(turnId, message));
+                  return;
+                }
+                acknowledge();
+                if (!state.stopped) emit({ ...base(threadId, turnId), type: "runtime.error", message });
+                emit({ ...base(threadId, turnId), type: "turn.completed", ok: state.stopped,
+                  stopReason: state.stopped ? "cancelled" : "rpc_error", cost: null });
+                return;
+              }
               emit({
                 ...base(threadId, turnId),
                 type: "runtime.error",
@@ -1717,7 +1815,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           }
         })();
 
-        return { turnId };
+        return startupAck ?? { turnId };
       };
 
       const snapshot = async (): Promise<ProviderSnapshot> => {
@@ -1773,6 +1871,9 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             for (const { stop } of active.values()) stop();
             // idle pooled sessions have no running turn — close them too
             for (const threadId of Array.from(sessions.keys())) closeSession(threadId, "stopAll");
+            for (const [threadId, children] of retiring) {
+              for (const child of children) void retireChild(threadId, child);
+            }
           },
           onEvent: (listener) => {
             listeners.add(listener);
@@ -1782,6 +1883,9 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         dispose: async () => {
           for (const { stop } of active.values()) stop();
           for (const threadId of Array.from(sessions.keys())) closeSession(threadId, "dispose");
+          for (const [threadId, children] of retiring) {
+            for (const child of children) void retireChild(threadId, child);
+          }
           listeners.clear();
         },
       };

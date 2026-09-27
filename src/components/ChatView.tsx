@@ -66,7 +66,7 @@ import { ReplyQuote } from "./ReplyQuote";
 import { ConnectorCard } from "./ConnectorCard";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { hasRoutineExecutionTask, RoutineRunCard } from "./RoutineRunCard";
-import { AttachmentGallery, collectMessageFiles } from "./AttachmentGallery";
+import { AttachmentGallery, collectMessageFiles, splitMessageAttachments } from "./AttachmentGallery";
 import { ScreenFrame } from "./ScreenFrame";
 import { CompactionChip, DigestChip } from "./DigestChip";
 import { RenameTitle } from "./RenameTitle";
@@ -81,7 +81,7 @@ import { cn } from "@/lib/cn";
 import { activeLocale, t } from "@/lib/i18n";
 import { COMPACT_BUBBLE } from "@/lib/compact-chip";
 import { useFocusMessage } from "@/lib/focus-message";
-import { groupTranscript } from "@/lib/activity-runs";
+import { groupTranscript, isRecoveryActivity } from "@/lib/activity-runs";
 import { ActivityRun } from "./ActivityRun";
 import { TurnNarrationRun } from "./TurnNarrationRun";
 import { webhookMessageView } from "@/lib/webhook-message";
@@ -332,19 +332,23 @@ function Bubble({
   const speech = useSpeech();
   const speaking = speech.messageId === message.id && speech.status !== "idle";
   const text = peer ? peer.body : (message.text ?? "");
-  const generatedPaths = useMemo(
-    () => message.attachments?.filter((attachment) => attachment.kind === "image").map((attachment) => attachment.path) ?? [],
-    [message.attachments],
+  const attached = useMemo(() => splitMessageAttachments(message.attachments), [message.attachments]);
+  const generatedPaths = attached.images;
+  const linkedFiles = useMemo(
+    () => user ? [] : [...attached.files, ...collectMessageFiles(text, [...attached.images, ...attached.files.map((file) => file.path)])],
+    [user, text, attached],
   );
   const voiceNotes = useMemo(
     () => message.attachments?.filter((attachment): attachment is VoiceNoteAttachment => attachment.kind === "audio") ?? [],
     [message.attachments],
   );
-  const linkedFiles = useMemo(() => user ? [] : collectMessageFiles(text, generatedPaths), [user, text, generatedPaths]);
   const webhookView = user ? webhookMessageView(text) : null;
   const attachments = user && !webhookView ? splitTranscriptAttachments(text) : null;
   const visibleText = webhookView?.task ?? attachments?.display ?? text;
   const hasAttachments = Boolean(attachments && (attachments.images.length || attachments.files.length));
+  // A message that is only attachments is just the files: no bubble around them.
+  const attachmentsOnly = !webhookView && !replyTarget && !visibleText.trim() &&
+    (user ? hasAttachments : generatedPaths.length + linkedFiles.length > 0);
   const collapsible =
     user && !webhookView && !expanded && (visibleText.length > USER_COLLAPSE_CHARS || visibleText.split("\n").length > USER_COLLAPSE_LINES);
 
@@ -415,9 +419,11 @@ function Bubble({
             emerging && "turn-answer",
             user && webhookView
               ? "overflow-hidden border border-accent/25 bg-card text-ink shadow-[0_10px_30px_rgba(0,0,0,0.18)]"
-              : user
-                ? "bg-bubble-user px-4 py-2.5 whitespace-pre-wrap text-ink"
-                : "bg-card px-4 py-2.5 text-ink",
+              : attachmentsOnly
+                ? "text-ink"
+                : user
+                  ? "bg-bubble-user px-4 py-2.5 whitespace-pre-wrap text-ink"
+                  : "bg-card px-4 py-2.5 text-ink",
           )}
           title={new Date(message.at).toLocaleString()}
         >
@@ -806,6 +812,14 @@ const MessagesList = memo(function MessagesList({
               );
             }
             case "activity": {
+              if (isRecoveryActivity(m)) {
+                return (
+                  <div role="status" className="flex w-fit max-w-full items-start gap-2 rounded-xl border border-hairline/40 bg-panel px-3 py-2 text-[13px] text-ink-secondary">
+                    <RefreshCw size={13} aria-hidden="true" className="mt-0.5 shrink-0" />
+                    <span className="min-w-0 break-words">{m.tool?.name.slice(9).trim()}</span>
+                  </div>
+                );
+              }
               // a failed turn is an error, not a tool run — render it as one.
               // bot⇄bot comm chips and opened-thread chips stay because they
               // link to another conversation.

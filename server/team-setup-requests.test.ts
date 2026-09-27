@@ -8,7 +8,7 @@ import { canAccessTeam } from "./peer-roster.ts";
 import type { BotRecord, OptionCardData } from "./store.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 
-function harness() {
+function harness(caps?: Record<string, { driverKind: string; agentsMcp: boolean }>) {
   const bots: BotRecord[] = [];
   const messages: Array<{ id: string; card?: OptionCardData }> = [];
   const teams = ["", "Work", "Engineering", "Private"];
@@ -50,6 +50,7 @@ function harness() {
       if (!({ claude: ["sonnet", "opus"], codex: ["gpt-fixture"] }[selection.instanceId]?.includes(selection.model))) return "Model is not in the current catalog";
       return current?.approvalMode === "full" && selection.instanceId !== current.modelSelection.instanceId ? "Existing permissions are incompatible" : null;
     },
+    ...(caps ? { driverCapabilities: (instanceId: string) => caps[instanceId] } : {}),
   });
   const propose = (operations: unknown[], newTeams: string[] = []) => service.propose({ botId: chief.id, threadId: chief.threadId, plan: { reason: "Requested specialist setup", operations, newTeams } });
   const submit = (operations: unknown[], newTeams: string[] = []) => service.submit({ botId: chief.id, threadId: chief.threadId, plan: { reason: "Requested specialist setup", operations, newTeams } });
@@ -69,6 +70,25 @@ describe("reviewed Chief team setup", () => {
     expect(h.store.bots).toEqual(before);
     expect((await h.resolve(request.requestId, "deny"))?.result.state).toBe("denied");
     expect(h.store.bots).toEqual(before);
+  });
+  it("warns what an engine switch gains and loses beyond the label", () => {
+    const h = harness({
+      claude: { driverKind: "claudeAgent", agentsMcp: true },
+      codex: { driverKind: "codex", agentsMcp: false },
+    });
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: { modelSelection: { instanceId: "codex", model: "gpt-fixture" } } }]);
+    expect(card.detail).toContain("Default engine/model");
+    expect(card.detail).toContain("Loses peer coordination and every team tool");
+    expect(card.detail).toContain("coordinate_bots");
+    expect(card.detail).toContain("Loses approval levels: edits.");
+    expect(card.detail).toContain("Gains approval levels: custom.");
+  });
+  it("renders nothing extra for a model-only change on the same engine", () => {
+    const h = harness({ claude: { driverKind: "claudeAgent", agentsMcp: true } });
+    const card = h.propose([{ action: "update", botId: h.peer.id, fields: { modelSelection: { instanceId: "claude", model: "opus" } } }]);
+    expect(card.detail).toContain("Default engine/model");
+    expect(card.detail).not.toContain("peer coordination");
+    expect(card.detail).not.toContain("approval levels");
   });
   it("creates a Chief in a new team and permits explicit replacement regardless of operation order", async () => {
     const h = harness();

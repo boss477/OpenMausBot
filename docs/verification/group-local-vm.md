@@ -97,3 +97,9 @@ container status and controls lease expiry and watchdog/deadline timing inside
 that child process.
 Production launchers never import it. No provider or live desktop is used by
 these regression tests; the opt-in Podman acceptance above covers real routing.
+
+The restart regression creates a per-bot VM through the fixture's lifecycle
+boundary, preserves a workspace file while removing the container, and restarts
+the server in that same disposable home. Auto recovers the prior VM once capacity
+is free, preserves its file, and neither probes nor provisions a bot that never
+had a VM. The occupied-cap case remains unprovisioned.

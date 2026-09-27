@@ -52,7 +52,8 @@ export type DecisionKind =
  * straight through from auto-approve.ts; `question` marks cards a rule may
  * never answer, `auto-fallback` a card shown after delivery failed, `routine`
  * a durable chat scheduling proposal, `skill` a staged learned-skill card,
- * `profile` a bot proposed a profile change, `user` the human's answer, and
+ * `profile` a bot proposed a profile change, `model` a bot proposed a default-model
+ * switch, `user` the human's answer, and
  * auto-review sources the isolated model reviewer. connector-scope rows
  * come from the connected-app grants verdict: the person pre-decided them
  * by editing a bot's connectorTools, so the call itself needed no card. */
@@ -63,6 +64,7 @@ export type DecisionSource =
   | "routine"
   | "skill"
   | "profile"
+  | "model"
   | "tightening"
   | "user"
   | "connector-scope"

@@ -31,6 +31,8 @@ export interface AutoVmClaimSlot {
    * ("the Local VM", "the VPS computer"). The table serves every lazily
    * claimed desktop, not only the Local VM it was written for. */
   label?: string;
+  /** This claim mounts a local workspace, not a remote Box/VPS desktop. */
+  localVm?: boolean;
   /** Called once, after the slot is marked failed, when the fired claim
    * rejected (issue #1369): the turn surfaces a terminal error and ends
    * instead of staying busy behind a gate that can only refuse. The

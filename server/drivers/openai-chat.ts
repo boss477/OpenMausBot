@@ -133,6 +133,12 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
     turnId: string;
     done: Promise<void>;
     approval: ReturnType<typeof createChatToolApproval>;
+    /** Mid-turn user input parked by adapter.steer. Spliced into the
+     * request array at the top of the next loop round — the one place the
+     * array is between rounds, never mid-tool-batch — so the model reads
+     * it before its next completion. Kept out of messages[] until then:
+     * a parked item must never look like delivered input. */
+    asides: string[];
   }>();
 
   const emit = (event: RuntimeEvent) => {
@@ -395,7 +401,8 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
     });
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
-    active.set(turn.threadId, { abort, turnId, done, approval });
+    const turnEntry = { abort, turnId, done, approval, asides: [] as string[] };
+    active.set(turn.threadId, turnEntry);
     emit({ ...base(turn.threadId, turnId), type: "turn.started" });
     emit({ ...base(turn.threadId, turnId), type: "session.started", sessionId: null, model });
 
@@ -422,6 +429,12 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
         }
         for (let round = 0; round < 16; round++) {
           abort.signal.throwIfAborted();
+          // Drain parked mid-turn input here, before the next completion
+          // request: the previous round's tool results are complete, so a
+          // user message lands on a consistent array (never inside a tool
+          // batch) and the provider sees it as the newest input.
+          const parked = turnEntry.asides.splice(0);
+          if (parked.length) messages.push({ role: "user", content: parked.join("\n\n") });
           native("out", options.nativeLog.outgoing(turn, messages, model));
           let attempt = 0;
           let completion: Completion;
@@ -636,9 +649,16 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       : { state: "unavailable", reason: options.unavailableReason },
     adapter: {
       provider: options.driverKind,
-      capabilities: { ...(options.computerUse ? { computerMcp: options.tools !== false, cloudComputerMcp: options.tools !== false, localComputerMcp: options.tools !== false,
+      capabilities: { ...(options.computerUse ? { computerMcp: options.tools !== false,
+        // Same gate as cloudComputerMcp: with tools off the runtime cannot
+        // mount the leased Box descriptor either. The fleet invariant test
+        // pins usesCloudComputer === (remoteAgent || cloudComputerMcp).
+        usesCloudComputer: options.tools !== false, cloudComputerMcp: options.tools !== false, localComputerMcp: options.tools !== false,
         browserMcp: options.tools !== false, nativeImageInput: true, images: true } : {}),
-        sessionModelSwitch: "in-session", customMcp: options.tools !== false, agentsMcp: options.tools !== false, composioMcp: options.tools !== false },
+        sessionModelSwitch: "in-session", customMcp: options.tools !== false, agentsMcp: options.tools !== false, composioMcp: options.tools !== false,
+        // The runtime owns the whole tool loop, so it can always take a
+        // user message mid-turn: park it, deliver before the next completion.
+        queueing: true },
       sendTurn,
       interruptTurn: async (threadId, turnId) => {
         const turn = active.get(threadId);
@@ -648,6 +668,18 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       },
       respondToRequest: async (threadId, requestId, decision) =>
         active.get(threadId)?.approval.answer(requestId, decision.behavior, decision.message) ?? "unavailable",
+      steer: async (threadId, text) => {
+        // This engine has no external session to respect — parking the
+        // words in the live turn's entry IS delivery into the loop, so a
+        // successful park is "steered" and a missing turn is the only
+        // refusal. The words ride the array at the next round boundary;
+        // if the turn settles first, the harness's transcript record
+        // keeps them for the next turn (they are never re-sent here).
+        const running = active.get(threadId);
+        if (!running) return "refused";
+        running.asides.push(text);
+        return "steered";
+      },
       hasSession: (threadId) => active.has(threadId),
       stopAll: async () => {
         const turns = [...active.values()];

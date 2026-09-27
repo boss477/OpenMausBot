@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  deletePromptSplitReceipt,
   promptHalves,
   promptSplitFingerprints,
   readPromptSplitReceipt,
@@ -49,6 +50,19 @@ describe("prompt-split receipts", () => {
     expect(readPromptSplitReceipt(scope, key)).toEqual(receipt);
     expect(readPromptSplitReceipt(scope, randomUUID())).toBeNull();
   });
+
+  it("round-trips the re-anchor turn counter and drops receipts on demand", () => {
+    const scope = "test-driver";
+    const key = randomUUID();
+    const receipt = { ...promptSplitFingerprints("stable rules", "memory"), turnsSinceFull: 4 };
+    writePromptSplitReceipt(scope, key, receipt);
+    expect(readPromptSplitReceipt(scope, key)).toEqual(receipt);
+    deletePromptSplitReceipt(scope, key);
+    expect(readPromptSplitReceipt(scope, key)).toBeNull();
+    // deleting an unknown receipt is a no-op, not an error
+    deletePromptSplitReceipt(scope, key);
+    deletePromptSplitReceipt(scope, randomUUID());
+  });
 });
 
 describe("splitSessionPrompt", () => {
@@ -91,5 +105,39 @@ describe("splitSessionPrompt", () => {
     const first = splitSessionPrompt("old rules.", "memory", null, fullSystem, "first");
     const second = splitSessionPrompt("new rules.", "memory", first.receipt, "new rules.\n\nmemory", "second");
     expect(second.text).toBe("new rules.\n\nmemory\n\nsecond");
+  });
+
+  it("re-anchors the full prompt after the requested run of bare turns", () => {
+    let state = splitSessionPrompt("stable rules.", "memory", null, fullSystem, "first", false, 3);
+    expect(state.text).toBe(fullSystem + "\n\nfirst");
+    expect(state.receipt.turnsSinceFull).toBe(0);
+    state = splitSessionPrompt("stable rules.", "memory", state.receipt, fullSystem, "second", false, 3);
+    expect(state.text).toBe("second");
+    state = splitSessionPrompt("stable rules.", "memory", state.receipt, fullSystem, "third", false, 3);
+    expect(state.text).toBe("third");
+    state = splitSessionPrompt("stable rules.", "memory", state.receipt, fullSystem, "fourth", false, 3);
+    expect(state.text).toBe("fourth");
+    // three bare turns have passed: the next delivery re-anchors
+    state = splitSessionPrompt("stable rules.", "memory", state.receipt, fullSystem, "fifth", false, 3);
+    expect(state.text).toBe(fullSystem + "\n\nfifth");
+    expect(state.receipt.turnsSinceFull).toBe(0);
+    state = splitSessionPrompt("stable rules.", "memory", state.receipt, fullSystem, "sixth", false, 3);
+    expect(state.text).toBe("sixth");
+  });
+
+  it("never re-anchors unless the caller opts in", () => {
+    let state = splitSessionPrompt("stable rules.", "memory", null, fullSystem, "first");
+    for (let turn = 2; turn <= 20; turn++) {
+      state = splitSessionPrompt("stable rules.", "memory", state.receipt, fullSystem, "turn " + turn);
+      expect(state.text).toBe("turn " + turn);
+    }
+  });
+
+  it("counts a legacy receipt without a turn counter from zero", () => {
+    const legacy = promptSplitFingerprints("stable rules.", "memory");
+    let state = splitSessionPrompt("stable rules.", "memory", legacy, fullSystem, "first", false, 1);
+    expect(state.text).toBe("first");
+    state = splitSessionPrompt("stable rules.", "memory", state.receipt, fullSystem, "second", false, 1);
+    expect(state.text).toBe(fullSystem + "\n\nsecond");
   });
 });

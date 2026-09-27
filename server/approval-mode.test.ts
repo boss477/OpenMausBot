@@ -9,6 +9,7 @@ import {
   isEmergencyApprovalDowngrade,
   isApprovalMode,
 } from "../shared/approval-mode.ts";
+import { createApprovalModeSupport } from "./harness-capabilities.ts";
 
 describe("approval modes", () => {
   it("resets only grants that cannot safely carry to the selected provider", () => {
@@ -106,5 +107,50 @@ describe("approval modes", () => {
     expect(approvalModeFor({ approvalMode: "full", approvalGrant, threadId: "target" })).toBe("ask");
     expect(approvalModeFor({ approvalMode: "full", approvalGrant, threadId: "other" })).toBe("full");
     expect(approvalModeFor({ approvalMode: "full", approvalGrant })).toBe("ask");
+  });
+});
+
+describe("approval support bound to a registry", () => {
+  const registry = {
+    cliTarget: (instanceId: string) =>
+      instanceId === "codex-fixture" ? { driverKind: "codex" }
+        : instanceId === "computer-fixture" ? { driverKind: "boxAgent" }
+        : null,
+  };
+  const supports = createApprovalModeSupport(registry);
+
+  it("resolves model selections through the registry", () => {
+    const codex = { instanceId: "codex-fixture", model: "fixture" };
+    const computer = { instanceId: "computer-fixture", model: "fixture" };
+    expect(supports(codex, "full")).toBe(true);
+    expect(supports(codex, "custom")).toBe(true);
+    expect(supports(computer, "ask")).toBe(true);
+    expect(supports(computer, "auto")).toBe(true);
+    expect(supports(computer, "full")).toBe(false);
+    expect(supports(computer, "custom")).toBe(false);
+  });
+
+  it("answers an unknown instance like an unknown driver", () => {
+    const ghost = { instanceId: "ghost", model: "fixture" };
+    expect(supports(ghost, "ask")).toBe(true);
+    expect(supports(ghost, "edits")).toBe(false);
+    expect(supports(ghost, "full")).toBe(false);
+    expect(supports(undefined, "ask")).toBe(true);
+    expect(supports(undefined, "full")).toBe(false);
+  });
+
+  it("passes already-resolved driver views to the table unchanged", () => {
+    expect(supports({ driverKind: "codex" }, "custom")).toBe(true);
+    expect(supports({ driverKind: "boxAgent" }, "full")).toBe(false);
+    expect(supports({ driverKind: undefined }, "ask")).toBe(true);
+    expect(supports({ driverKind: undefined }, "full")).toBe(false);
+  });
+
+  it("agrees with the pure table across every mode", () => {
+    for (const driverKind of ["codex", "claudeAgent", "boxAgent", "piAgent", undefined] as const) {
+      for (const mode of APPROVAL_MODES) {
+        expect(supports({ driverKind }, mode)).toBe(supportsApprovalMode(driverKind, mode));
+      }
+    }
   });
 });

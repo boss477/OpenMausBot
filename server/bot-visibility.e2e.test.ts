@@ -14,10 +14,10 @@
 // This is access control, not an approval gate: no card, prompt or dialog
 // is involved anywhere.
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { SessionRegistry } from "./sessions.ts";
@@ -50,7 +50,7 @@ const api = async (method: string, path: string, body?: unknown, as?: string): P
 const status = async (method: string, path: string, as?: string, body?: unknown) => (await api(method, path, body, as)).status;
 
 async function start() {
-  child = spawn(process.execPath, [join(SERVER_DIR, "index.ts")], {
+  child = spawn(process.execPath, ["--import", pathToFileURL(join(SERVER_DIR, "testing", "hold-search-result.ts")).href, join(SERVER_DIR, "index.ts")], {
     cwd: join(SERVER_DIR, ".."),
     env: {
       ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
@@ -322,6 +322,36 @@ posixOnly("per-bot visibility on a shared workspace", () => {
     const map = (await api("GET", "/api/team-map", undefined, BOB)).body;
     expect(JSON.stringify(map)).not.toContain(ids.hr);
   });
+
+  it("withdraws real scan results when an audience changes before the response", async () => {
+    const hold = join(home, ".openmausbot", "hold-search-result");
+    let pending: Promise<{ status: number; body: any }> | undefined;
+    try {
+      expect((await api("GET", "/api/search?q=Zebra", undefined, ADA)).body.hits).toEqual(expect.arrayContaining([
+        expect.objectContaining({ threadId: ids.hrThread }),
+      ]));
+      writeFileSync(hold, "fixture only");
+      let finished = false;
+      pending = api("GET", "/api/search?q=Zebra", undefined, ADA).finally(() => { finished = true; });
+      expect(await waitFor(() => existsSync(`${hold}.ready`), 5000)).toBe(true);
+      // The real worker already found the private row. Pause only delivery,
+      // so this cannot pass merely because revocation beat request admission.
+      expect(JSON.parse(readFileSync(`${hold}.ready`, "utf8"))).toEqual(expect.arrayContaining([
+        expect.objectContaining({ threadId: ids.hrThread }),
+      ]));
+      expect((await api("PATCH", `/api/bots/${ids.hr}`, { visibility: "admins" }, BOSS)).status).toBe(200);
+      expect(finished).toBe(false);
+      rmSync(hold);
+      const result = await pending;
+      expect(result.status).toBe(200);
+      expect(result.body.hits).toEqual([]);
+    } finally {
+      rmSync(hold, { force: true });
+      rmSync(`${hold}.ready`, { force: true });
+      await pending;
+      await api("PATCH", `/api/bots/${ids.hr}`, { visibility: { people: [ADA] } }, BOSS);
+    }
+  }, 20_000);
 
   it("keeps the audience an admin's setting", async () => {
     const member = await api("PATCH", `/api/bots/${ids.pub}`, { visibility: "admins" }, ADA);

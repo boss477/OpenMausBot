@@ -96,6 +96,52 @@ jobs:
         if: matrix.shard == 1
         run: pnpm broker:test && pnpm test:electron
 
+  behavior-evals:
+    needs: static
+    # The offline behavior-eval tiers (#1503): the evals' own vitest gate
+    # (redaction, trace, golden replay), the tier-1 scenario runner, and the
+    # tier-2 golden replay through the same entrypoint developers use. Tier
+    # 3's live models stay opt-in: CI never sets OMB_EVAL_LIVE or any live
+    # env, and the last step proves the offline gate holds by asserting the
+    # skip line is what CI gets.
+    name: behavior evals (offline tiers 1-3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ff378ebe6b225b0680b81c1ad4498ae0d1d3a5e3 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Eval suite typecheck (standalone tsconfig)
+        # The root typecheck builds src and server only; evals carries its
+        # own tsconfig, so its type gate runs here with the rest of the
+        # eval surfaces.
+        run: pnpm exec tsc -p evals/tsconfig.json
+      - name: Eval vitest gate (redaction, trace, golden replay)
+        # Same reporter pair as the vitest shards, so a failure annotates
+        # the PR with the failing test and assertion.
+        run: pnpm exec vitest run --config evals/vitest.config.ts --reporter=default --reporter=github-actions
+      - name: Tier 1 scenarios (scripted harness, no models)
+        run: pnpm eval
+      - name: Tier 2 golden replay against committed baselines
+        run: pnpm eval --golden
+      - name: Tier 3 stays offline in CI (the skip is the pass condition)
+        run: |
+          output="$(pnpm eval --live 2>&1)"
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -q "live tier skipped"
+      - name: Upload eval run reports on failure
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: behavior-evals-reports-${{ github.sha }}-${{ github.run_attempt }}
+          path: evals/reports/runs/
+          if-no-files-found: warn
+          retention-days: 7
+
   packaged-server:
     needs: static
     # `pnpm build:server`, then the bundle is copied out of the repo and run
@@ -166,7 +212,7 @@ jobs:
     # above, so the requirement holds without a settings change. Once the
     # ruleset requires this gate directly, collapse the matrix to one job.
     name: typecheck + test (${{ matrix.os }})
-    needs: [static, vitest, packaged-server, windows-cua, electron-smokes]
+    needs: [static, vitest, behavior-evals, packaged-server, windows-cua, electron-smokes]
     # Still report failed/skipped dependencies, but don't keep a superseded
     # workflow alive just to schedule its summary jobs.
     if: ${{ !cancelled() }}

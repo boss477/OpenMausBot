@@ -5,7 +5,7 @@
 // work, recent work) legitimately changes mid-conversation and reaches
 // the model inside the turn that changed it, after the cacheable prefix.
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DATA_DIR } from "../config.ts";
 import { writeFileAtomic } from "../atomic.ts";
@@ -57,6 +57,9 @@ export function withContextNote(note: string, text: string): string {
 export interface PromptSplitReceipt {
   stable: string;
   volatile: string;
+  /** Turns delivered since the full prompt last rode. Re-anchor
+   * bookkeeping; absent on receipts written before the counter existed. */
+  turnsSinceFull?: number;
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -78,9 +81,13 @@ export function readPromptSplitReceipt(scope: string, key: string): PromptSplitR
   try {
     const raw = JSON.parse(readFileSync(receiptPath(scope, key), "utf8")) as unknown;
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-      const record = raw as { stable?: unknown; volatile?: unknown };
+      const record = raw as { stable?: unknown; volatile?: unknown; turnsSinceFull?: unknown };
       if (typeof record.stable === "string" && typeof record.volatile === "string") {
-        return { stable: record.stable, volatile: record.volatile };
+        return {
+          stable: record.stable,
+          volatile: record.volatile,
+          ...(typeof record.turnsSinceFull === "number" ? { turnsSinceFull: record.turnsSinceFull } : {}),
+        };
       }
     }
   } catch {
@@ -94,6 +101,18 @@ export function writePromptSplitReceipt(scope: string, key: string, receipt: Pro
   writeFileAtomic(receiptPath(scope, key), JSON.stringify(receipt), { mode: 0o600 });
 }
 
+/** Drop a session's receipt: its history was rewritten (pi compaction
+ * summarizes older messages), so what it last carried is unknown and the
+ * next turn re-delivers the full prompt. A missing receipt already reads
+ * as unknown, so deleting one is always safe. */
+export function deletePromptSplitReceipt(scope: string, key: string): void {
+  try {
+    rmSync(receiptPath(scope, key));
+  } catch {
+    /* a missing receipt is already unknown */
+  }
+}
+
 /** Compose the prompt for a session that persists its own history (ACP
  * agents, pi): the full system block rides only when this native session
  * has not carried it - or carried a different one, which re-delivers the
@@ -102,7 +121,11 @@ export function writePromptSplitReceipt(scope: string, key: string, receipt: Pro
  * through bare, so an ordinary memory write neither appends a second copy
  * of the prompt to the session nor re-prices its cached prefix.
  * perTurnVolatile marks a turn whose volatile half describes this very
- * turn (a mention): its note is delivered even when the text is unchanged. */
+ * turn (a mention): its note is delivered even when the text is unchanged.
+ * reAnchorAfterTurns, when positive, re-sends the full prompt after that
+ * many consecutive bare turns: a session that rewrites its own history
+ * without an observable event (an older pi, a missed compaction) still
+ * gets its standing instructions back within a bounded number of turns. */
 export function splitSessionPrompt(
   stable: string,
   volatile: string,
@@ -110,13 +133,17 @@ export function splitSessionPrompt(
   fullSystem: string | undefined,
   text: string,
   perTurnVolatile = false,
+  reAnchorAfterTurns = 0,
 ): { text: string; receipt: PromptSplitReceipt } {
-  const receipt = promptSplitFingerprints(stable, volatile);
-  if (previous === null || previous.stable !== receipt.stable) {
-    return { text: fullSystem ? fullSystem + "\n\n" + text : text, receipt };
+  const fingerprints = promptSplitFingerprints(stable, volatile);
+  // Legacy receipts predate the turn counter; count them from zero.
+  const turnsSinceFull = typeof previous?.turnsSinceFull === "number" ? previous.turnsSinceFull : 0;
+  const reAnchor = reAnchorAfterTurns > 0 && previous !== null && turnsSinceFull >= reAnchorAfterTurns;
+  if (previous === null || previous.stable !== fingerprints.stable || reAnchor) {
+    return { text: fullSystem ? fullSystem + "\n\n" + text : text, receipt: { ...fingerprints, turnsSinceFull: 0 } };
   }
-  const note = previous.volatile === receipt.volatile && !perTurnVolatile
+  const note = previous.volatile === fingerprints.volatile && !perTurnVolatile
     ? ""
     : volatileContextNote(volatile, previous.volatile !== EMPTY_FINGERPRINT);
-  return { text: withContextNote(note, text), receipt };
+  return { text: withContextNote(note, text), receipt: { ...fingerprints, turnsSinceFull: turnsSinceFull + 1 } };
 }

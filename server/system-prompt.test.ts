@@ -10,6 +10,7 @@ import {
   buildSystemPrompt,
   userProfileSystemPrompt,
   computerPrompt,
+  resolveComputerPromptKind,
   mentionPrompt,
   COMPOSIO_PROMPT,
   composioSystemPrompt,
@@ -21,7 +22,66 @@ import {
   ROUTINE_EXECUTION_PROMPT,
   WEBHOOK_PROMPT,
   SIGN_IN_PROMPT,
+  type ComputerPromptKind,
 } from "./system-prompt.ts";
+
+describe("resolveComputerPromptKind", () => {
+  // One ladder for the settings preview, a direct turn, and a room turn,
+  // with dispatch semantics canonical: the mounts have already refused a
+  // plan the engine cannot run, so the resolved kind alone decides. The
+  // rows where the old preview returned null (capability gates the mounts
+  // already enforce) are pinned here because no dispatchable engine in the
+  // test fleet lacks the capability — the full grid lives in the PR's
+  // agreement matrix artifact.
+  it.each([
+    // a VM plan is decided by the configured mode alone
+    [{ kind: "vm", driverKind: "claude", cloudComputerMcp: undefined, vmPrivate: false }, "vm-shared"],
+    [{ kind: "vm", driverKind: "claude", cloudComputerMcp: true, vmPrivate: true }, "vm-private"],
+    [{ kind: "vm", driverKind: "boxAgent", cloudComputerMcp: false, vmPrivate: false }, "vm-shared"],
+    // a box plan: the agent earns its own kind, a driver that keeps its
+    // identity and speaks the computer MCP gets the chat paragraph, and the
+    // bare box branch stays reachable for drivers the swap cannot replace
+    [{ kind: "box", driverKind: "boxAgent", cloudComputerMcp: false, vmPrivate: false }, "box-agent"],
+    [{ kind: "box", driverKind: "codex", cloudComputerMcp: true, vmPrivate: false }, "box-chat"],
+    [{ kind: "box", driverKind: "codex", cloudComputerMcp: false, vmPrivate: false }, "box"],
+    [{ kind: "box", driverKind: "claude", cloudComputerMcp: false, vmPrivate: false }, "box"],
+    // vps and local never depended on more than the plan
+    [{ kind: "vps", driverKind: "claude", cloudComputerMcp: undefined, vmPrivate: false }, "vps"],
+    [{ kind: "vps", driverKind: "claude", cloudComputerMcp: false, vmPrivate: false }, "vps"],
+    [{ kind: "local", driverKind: "claude", cloudComputerMcp: undefined, vmPrivate: false }, "local"],
+    [{ kind: "local", driverKind: "boxAgent", cloudComputerMcp: false, vmPrivate: false }, "local"],
+    // and no plan earns no paragraph
+    [{ kind: null, driverKind: "claude", cloudComputerMcp: true, vmPrivate: true }, null],
+  ] as const)("resolves %j to %s", (input, expected) => {
+    expect(resolveComputerPromptKind(input)).toBe(expected);
+  });
+});
+
+describe("computerPrompt", () => {
+  it("gives every kind its own paragraph plus the sign-in policy, and silence to none", () => {
+    expect(computerPrompt(null)).toBe("");
+    // the box agent already lives on the computer: no paragraph, only the
+    // shared sign-in policy still applies
+    expect(computerPrompt("box-agent")).toBe(SIGN_IN_PROMPT);
+    const paragraphs: Record<string, string> = {
+      "vm-private": "your own isolated Cua sandbox",
+      "vm-shared": "shared, isolated Cua sandbox",
+      box: "You have your own cloud computer",
+      "box-chat": "You control the assigned cloud computer",
+      vps: "This is a VPS, not Box",
+      local: "act on the user's computer",
+    };
+    for (const [kind, distinct] of Object.entries(paragraphs)) {
+      const prompt = computerPrompt(kind as ComputerPromptKind);
+      expect(prompt.endsWith(SIGN_IN_PROMPT)).toBe(true);
+      expect(prompt).toContain(distinct);
+    }
+    // every paragraph is distinct, so one kind cannot silently stand in
+    // for another anywhere the resolver feeds this function
+    expect(new Set(Object.keys(paragraphs).map((kind) => computerPrompt(kind as ComputerPromptKind))).size)
+      .toBe(Object.keys(paragraphs).length);
+  });
+});
 
 describe("buildSystemPrompt", () => {
   it("keeps shared context stable and omits an empty user profile", () => {

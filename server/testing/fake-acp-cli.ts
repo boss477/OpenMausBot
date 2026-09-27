@@ -13,6 +13,8 @@
 //                       real-agent shape that forces the driver's one-shot
 //                       re-spawn fallback. A fresh process holds no live
 //                       session, so its load succeeds.
+//   FAKE_ACP_CACHED_LIVE_LOAD  acknowledge session/load of a live session but
+//                       keep its original MCP credentials, matching Qwen.
 //   FAKE_ACP_MODE   happy (default) | image | empty-reply | reasoning-only | exit-early | fail-after-text | hang | hang-initialize | stall-after-text | no-auth | auth-required | permission | question
 //                   | ask-question-unsupported (send a cursor/ask_question server→client
 //                     request mid-prompt; the driver must answer -32601 method
@@ -40,6 +42,12 @@
 //                   | stall-after-text (stream one message chunk, then go
 //                     fully silent forever — a wedged agent mid-answer; the
 //                     driver's prompt idle guard must fail the turn on its own)
+//                   | slow-tool (start a tool call and send nothing while it
+//                     "runs" for FAKE_ACP_TOOL_MS, default 600 — a quiet
+//                     `sleep` or build — then finish it and answer)
+//                   | stall-after-tool (finish a tool call, then go fully
+//                     silent forever: the guard must still fire once no tool
+//                     is running)
 //   FAKE_ACP_MCP_TRANSPORTS  comma list of remote MCP transports the agent
 //                       advertises in initialize (mcpCapabilities), e.g. "http,sse"
 //   FAKE_ACP_PERMISSION_OPTIONS JSON options override in permission mode
@@ -58,7 +66,8 @@
 //   FAKE_ACP_RPC_FAILURE_FILE  read a JSON-RPC error object on session/prompt;
 //                       once read this process stays poisoned even if the
 //                       file is removed. A replacement process can recover.
-//   FAKE_ACP_RPC_FAILURE_METHOD  session/new or session/prompt (default).
+//   FAKE_ACP_RPC_FAILURE_METHOD  initialize, session/new or session/prompt (default).
+//   FAKE_ACP_RPC_FAILURE_GATE  hold the error until this file exists.
 //   FAKE_ACP_RPC_FAILURE_AFTER_OUTPUT  emit text + a tool result before failing.
 //   FAKE_ACP_LOAD_ERROR  JSON-RPC error object returned by session/load.
 //   FAKE_ACP_MODELS      comma-separated model ids. Enables the opencode-shaped
@@ -341,8 +350,18 @@ function failRpc(msg: { method: string; id: unknown }): boolean {
   if (failureFile && existsSync(failureFile)) rpcFailure = JSON.parse(readFileSync(failureFile, "utf8"));
   if (!rpcFailure) return false;
   if (msg.method === "session/prompt" && process.env.FAKE_ACP_RPC_FAILURE_AFTER_OUTPUT === "1") playTurn();
-  recordMethod(`${msg.method}.error`);
-  out({ jsonrpc: "2.0", id: msg.id, error: rpcFailure });
+  const fail = () => {
+    recordMethod(`${msg.method}.error`);
+    out({ jsonrpc: "2.0", id: msg.id, error: rpcFailure });
+  };
+  const gate = process.env.FAKE_ACP_RPC_FAILURE_GATE;
+  if (gate && !existsSync(gate)) {
+    const timer = setInterval(() => {
+      if (!existsSync(gate)) return;
+      clearInterval(timer);
+      fail();
+    }, 20);
+  } else fail();
   return true;
 }
 
@@ -469,6 +488,7 @@ function handle(msg: any) {
 
   switch (msg.method) {
     case "initialize": {
+      if (failRpc(msg)) break;
       if (mode === "hang-initialize") {
         setInterval(() => {}, 1_000);
         return;
@@ -551,7 +571,8 @@ function handle(msg: any) {
         });
         break;
       }
-      if (mode === "safe-agent-reads") {
+      const cachedLiveLoad = process.env.FAKE_ACP_CACHED_LIVE_LOAD === "1" && liveSession === msg.params?.sessionId;
+      if (mode === "safe-agent-reads" && !cachedLiveLoad) {
         agentsMcp = (msg.params?.mcpServers ?? []).find((server: any) => server.name === "agents") ?? null;
       }
       if (process.env.FAKE_ACP_DUMP) {
@@ -703,6 +724,26 @@ function handle(msg: any) {
             : { stopReason: "end_turn", _meta: { inputTokens: 10, outputTokens: 5 } },
         );
       };
+      if (mode === "slow-tool" || mode === "stall-after-tool") {
+        const tool = (update: Record<string, unknown>) =>
+          out({ jsonrpc: "2.0", method: "session/update", params: { update: { toolCallId: "tc-slow", ...update } } });
+        // ACP's default status is pending: this tool_call carries none.
+        tool({ sessionUpdate: "tool_call", title: "sleep", rawInput: { command: "sleep 45 && echo done" } });
+        tool({ sessionUpdate: "tool_call_update", status: "in_progress" });
+        const finish = () => tool({ sessionUpdate: "tool_call_update", status: "completed", rawOutput: { output: "done" } });
+        if (mode === "stall-after-tool") {
+          finish();
+          hangingPromptId = msg.id;
+          hangKeepAlive = setInterval(() => {}, 1_000);
+          return;
+        }
+        setTimeout(() => {
+          finish();
+          out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "done" } } } });
+          complete();
+        }, Number(process.env.FAKE_ACP_TOOL_MS ?? 600));
+        return;
+      }
       const promptText = String(msg.params?.prompt?.[0]?.text ?? "");
       // A delegated reply woke this bot (control-plane continuation): the
       // harness revived it to fold the result in. Synthesize instead of
@@ -929,7 +970,7 @@ function handle(msg: any) {
         // two exact calls in the reported regression, repeated in one turn.
         void (async () => {
           for (const name of ["list_bots", "session_search", "list_bots"]) {
-            const nativeAuto = argv[argv.indexOf("--permission-mode") + 1] === "auto";
+            const nativeAuto = ["--permission-mode", "--approval-mode"].some((flag) => argv.includes(flag) && argv[argv.indexOf(flag) + 1] === "auto");
             if (!nativeAuto) {
               const allowed = await new Promise<boolean>((resolve) => {
                 pendingPermissionId = 9100;

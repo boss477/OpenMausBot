@@ -22,6 +22,7 @@ import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
 import type { MascotBodyId } from "../../shared/mascot-bodies";
 import type { QuestionRequestCardData } from "../../shared/ask-question";
 import type { ProfileRequestCardData } from "../../shared/profile-request";
+import type { ModelRequestCardData } from "../../shared/model-request";
 import type { RoutineRequestCardData } from "../../shared/routine-request";
 import type { RoutineRunCardData } from "../../shared/routine-run";
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run";
@@ -107,6 +108,8 @@ export interface OptionCardData {
   skillRequest?: SkillRequestCardData;
   /** Persisted profile proposal used by the server when the user confirms it. */
   profileRequest?: ProfileRequestCardData;
+  /** Persisted default-model proposal used by the server when the user confirms it. */
+  modelRequest?: ModelRequestCardData;
   teamSetupRequest?: import("../../shared/team-setup").TeamSetupRequest;
   /** The model's own questions and options (Claude's AskUserQuestion), so
    * the card offers choices instead of an unanswerable Allow/Deny. */
@@ -149,8 +152,8 @@ export interface Message {
   /** digest messages: what the turn did, rendered in `text` and structured here. */
   digest?: TurnDigest;
   compaction?: import("../../shared/wire").WireMessage["compaction"];
-  /** Provider-generated files attached to this assistant response. Kinds the
-   * renderer cannot display yet decode without breaking; only images render. */
+  /** Files attached to this assistant response: provider-generated images, and
+   * voice notes, documents, audio and video a bot attached with attach_file. */
   attachments?: import("../../shared/wire").WireMessage["attachments"];
   card?: OptionCardData;
   connector?: ConnectorCardData;
@@ -603,6 +606,7 @@ export interface ConfigStatus {
   /** Workspace defaults for new bots; absent effort = no level is sent. */
   newBots?: { effort?: EffortLevel };
   threads?: { maxConcurrentPerBot: number; eventLogMaxBytes?: number; eventLogRetentionDays?: number };
+  automaticRecovery?: { enabled: boolean; backup?: ModelSelection };
   localVm: { mode: "shared" | "per-bot"; maxInstances: number };
   opencodeGo?: { configured: boolean };
   /** Voice. `configured` = the engine has what it needs (an ElevenLabs or
@@ -694,7 +698,7 @@ export interface BrowserProfile {
 // Settings shows (a saved key's Test button used to vanish that way).
 export type ConfigStatusFrame = Pick<
   ConfigStatus,
-  "xai" | "mistral" | "anthropic" | "openaiCompat" | "fleet" | "composio" | "box" | "vps" | "rooms" | "threads" | "localVm" | "opencodeGo" | "tts" | "stt" | "imageGen" | "profile" | "language" | "features" | "onboarding" | "browserEngine" | "browserProfiles" | "edition" | "budgets" | "billing" | "managedPolicy"
+  "xai" | "mistral" | "anthropic" | "openaiCompat" | "fleet" | "composio" | "box" | "vps" | "rooms" | "threads" | "automaticRecovery" | "localVm" | "opencodeGo" | "tts" | "stt" | "imageGen" | "profile" | "language" | "features" | "onboarding" | "browserEngine" | "browserProfiles" | "edition" | "budgets" | "billing" | "managedPolicy"
 >;
 
 export function configStatusFromFrame(frame: ConfigStatusFrame): ConfigStatus {
@@ -709,6 +713,7 @@ export function configStatusFromFrame(frame: ConfigStatusFrame): ConfigStatus {
     vps: frame.vps,
     rooms: frame.rooms,
     threads: frame.threads,
+    automaticRecovery: frame.automaticRecovery,
     localVm: frame.localVm,
     opencodeGo: frame.opencodeGo,
     tts: frame.tts,

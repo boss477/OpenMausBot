@@ -2141,6 +2141,12 @@ describe("live config frames", () => {
     localVm: { mode: "shared", maxInstances: 1 },
   };
 
+  it("keeps automatic recovery and its backup through live config refreshes", () => {
+    const automaticRecovery = { enabled: true, backup: { instanceId: "backup", model: "fixture-model" } };
+    expect(configStatusFromFrame({ ...baseFrame, automaticRecovery }).automaticRecovery).toEqual(automaticRecovery);
+    expect(configStatusFromFrame({ ...baseFrame, automaticRecovery: { enabled: false } }).automaticRecovery).toEqual({ enabled: false });
+  });
+
   it("preserves edition, budgets and billing through configStatusFromFrame", () => {
     const frame: ConfigStatusFrame = {
       ...baseFrame,

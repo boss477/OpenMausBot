@@ -436,6 +436,29 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
   const { botId: BOT_ID, threadId: THREAD_ID, depth: DEPTH, externalRuntime: EXTERNAL_RUNTIME, coordinating: COORDINATING, turn } = context;
   const { delegationTaskIdsThisTurn } = turn;
   const { api, apiResponse } = context.client;
+  if (name === "vm_exec") {
+    const { ok, body } = await apiResponse("/api/internal/vm-exec", {
+      method: "POST",
+      body: JSON.stringify({ command: args.command, ...(typeof args.timeout_seconds === "number" ? { timeout_seconds: args.timeout_seconds } : {}) }),
+    });
+    if (!ok) return { text: String(body.error ?? "Could not run that command."), isError: true };
+    const exitCode = Number(body.exitCode ?? 0);
+    const stdout = String(body.stdout ?? "");
+    const stderr = String(body.stderr ?? "");
+    const lines = [body.timedOut ? "The command was stopped: it ran past its time limit." : `exit code ${exitCode}`];
+    if (stdout) lines.push("--- stdout ---", stdout.replace(/\s+$/, ""));
+    if (stderr) lines.push("--- stderr ---", stderr.replace(/\s+$/, ""));
+    if (!stdout && !stderr && !body.timedOut) lines.push("(no output)");
+    return { text: lines.join("\n"), ...(exitCode !== 0 || body.timedOut ? { isError: true } : {}) };
+  }
+  if (name === "attach_file") {
+    const { ok, body } = await apiResponse("/api/internal/attach-file", {
+      method: "POST",
+      body: JSON.stringify({ path: args.path, ...(typeof args.name === "string" ? { name: args.name } : {}) }),
+    });
+    if (!ok) return { text: String(body.error ?? "Could not attach that file."), isError: true };
+    return { text: `Attached ${String(body.name ?? "the file")} (${Number(body.bytes ?? 0)} bytes). It now appears in the chat with a preview.` };
+  }
   if (name === "create_options_card") {
     if (BOT_ID !== WATCHER_OPTIONS_CARD_BOT_ID) {
       return { text: "create_options_card is not enabled for this bot.", isError: true };
@@ -598,6 +621,21 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
       };
     }
     if (r.busy) {
+      // Aside lane: the teammate was mid-turn on a seam-capable engine, so
+      // the harness folded the message into their running work as peer
+      // context. No new turn started and no reply is coming back through
+      // this call — the receipt says whether the words are already in the
+      // live turn or waiting for it to settle.
+      if (r.aside === "injected") {
+        return {
+          text: `${r.toBotName ?? "That bot"} is mid-turn; your message was handed to them as an aside — peer context folded into their current work, not a request that interrupts or replies. Finish your turn and treat their eventual output as possibly informed by it.`,
+        };
+      }
+      if (r.aside === "queued") {
+        return {
+          text: `${r.toBotName ?? "That bot"} is mid-turn; your aside is queued and will reach them as context when the turn settles. No reply is expected — finish your turn.`,
+        };
+      }
       // The harness queues the message as a delegation when it can; the
       // task id is the asker's claim ticket for the eventual reply.
       const taskId = String(r.taskId ?? "").trim();
@@ -1002,6 +1040,33 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
       }),
     });
     return confirmationResult(r, "the profile change", "profile");
+  }
+  if (name === "propose_model") {
+    const raw = args.model_selection;
+    const fields = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    if (!fields || typeof fields.instanceId !== "string" || !fields.instanceId.trim() || typeof fields.model !== "string" || !fields.model.trim()) {
+      return { text: "propose_model needs model_selection with instanceId and model.", isError: true };
+    }
+    if ((fields.effort !== undefined && (typeof fields.effort !== "string" || !fields.effort.trim()))
+      || (fields.variant !== undefined && (typeof fields.variant !== "string" || !fields.variant.trim()))) {
+      return { text: "propose_model effort and variant must be non-empty strings when supplied.", isError: true };
+    }
+    const selection: Json = { instanceId: fields.instanceId.trim(), model: fields.model.trim() };
+    if (typeof fields.effort === "string" && fields.effort.trim()) selection.effort = fields.effort.trim();
+    if (typeof fields.variant === "string" && fields.variant.trim()) selection.variant = fields.variant.trim();
+    const forBotId = String(args.for_bot_id ?? "").trim();
+    const r = await api("/api/internal/model-requests", {
+      method: "POST",
+      body: JSON.stringify({
+        fromBotId: BOT_ID,
+        fromThreadId: THREAD_ID,
+        modelSelection: selection,
+        reason: args.reason,
+        // JSON.stringify drops the key entirely when no target was named
+        forBotId: forBotId || undefined,
+      }),
+    });
+    return confirmationResult(r, "the default model change", "model");
   }
   if (name === "memory_update") {
     if (!["append", "replace", "remove", "supersede"].includes(String(args.action))

@@ -3,16 +3,20 @@
 // payloads stay in the top group. VibeCoder would join Local later.
 import type { InstanceInfo } from "@/state/store";
 
-/** The picker is for usable connections; the full catalog stays in Settings.
- * A signed-out CLI can still run its configured custom/local models. */
-export function configuredModelInstances(instances: readonly InstanceInfo[]): InstanceInfo[] {
-  return instances.flatMap((instance) => {
-    if (instance.snapshot.state !== "available") return [];
-    const options = instance.access !== "custom" && instance.snapshot.authenticated === false
-      ? instance.models.options.filter((option) => option.custom)
-      : instance.models.options;
-    return options.length ? [{ ...instance, models: { ...instance.models, options } }] : [];
-  });
+/** The picker lists engines someone can use or finish setting up; the full
+ * catalog stays in Settings. Each instance (so each Claude account) is judged
+ * on its own:
+ * - an installed engine stays with its whole catalog, signed in or not. A
+ *   signed-out one shows its sign-in card instead of cloud models, and its
+ *   local models stay pickable;
+ * - the engine the bot runs on now always stays, even when its CLI is
+ *   missing, so its setup card explains why instead of the model vanishing;
+ * - an engine that is not installed and not in use stays in Settings, as does
+ *   an installed engine with nothing to list. */
+export function configuredModelInstances(instances: readonly InstanceInfo[], selectedInstanceId?: string): InstanceInfo[] {
+  return instances.filter((instance) =>
+    instance.instanceId === selectedInstanceId
+      || (instance.snapshot.state === "available" && instance.models.options.length > 0));
 }
 
 export function isCustomOnly(instance: { access?: InstanceInfo["access"] } | undefined): boolean {

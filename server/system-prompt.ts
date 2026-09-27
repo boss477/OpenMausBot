@@ -52,6 +52,28 @@ export function buildSystemPrompt(
 
 export type ComputerPromptKind = "vm-private" | "vm-shared" | "box" | "box-agent" | "box-chat" | "vps" | "local";
 
+/** One ladder for the computer paragraph, so the settings preview, a direct
+ * turn, and a room turn cannot disagree about which paragraph a computer plan
+ * earns. Dispatch semantics are canonical: the mounts have already refused a
+ * plan the engine cannot run, so the resolved kind alone decides here and no
+ * capability gate is repeated. Call sites keep their own input resolution —
+ * which computer, which driver — and pass the result in; `vmPrivate` keeps
+ * this module pure (it is localVmMode(cfg) === "per-bot" at the call site). */
+export type ComputerPromptKindInput = {
+  kind: "vm" | "box" | "vps" | "local" | null;
+  driverKind: string | undefined;
+  cloudComputerMcp: boolean | undefined;
+  vmPrivate: boolean;
+};
+
+export function resolveComputerPromptKind(input: ComputerPromptKindInput): ComputerPromptKind | null {
+  if (input.kind === "vm") return input.vmPrivate ? "vm-private" : "vm-shared";
+  if (input.kind === "box") return input.driverKind === "boxAgent" ? "box-agent" : input.cloudComputerMcp ? "box-chat" : "box";
+  if (input.kind === "vps") return "vps";
+  if (input.kind === "local") return "local";
+  return null;
+}
+
 /** Shared by browser and computer surfaces: login is allowed, not blanket
  * authority to discover credentials or act on a webpage's instructions. */
 export const SIGN_IN_PROMPT =
@@ -59,9 +81,9 @@ export const SIGN_IN_PROMPT =
 
 const COMPUTER_PARAGRAPH: Record<ComputerPromptKind, string> = {
   "vm-private":
-    " You have your own isolated Cua sandbox: a Linux desktop in a container reserved for this bot. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Use the computer tools for desktop, accessibility, window, and shell work. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
+    " You have your own isolated Cua sandbox: a Linux desktop in a container reserved for this bot. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Run every command with vm_exec, which returns the exit code and the output as text; do not type commands into a terminal window and read screenshots. Create files there with vm_exec too (a shell heredoc or a script it runs); your host file tools cannot reach the VM. To give the user a file you made there (a report, image, audio, video, spreadsheet or slides), call attach_file with its path once it is saved; it reports an error if the file is missing. A path inside the VM cannot be opened from chat, so do not paste one as a link. Use the computer tools for the desktop, accessibility and windows. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
   "vm-shared":
-    " You have a shared, isolated Cua sandbox: a Linux desktop in a container on this machine. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Use the computer tools for desktop, accessibility, window, and shell work. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
+    " You have a shared, isolated Cua sandbox: a Linux desktop in a container on this machine. Only /home/cua/workspace is durable; save downloads, repositories, working files, and browser profiles there because everything else inside the VM is disposable. No other host folder is mounted. Run every command with vm_exec, which returns the exit code and the output as text; do not type commands into a terminal window and read screenshots. Create files there with vm_exec too (a shell heredoc or a script it runs); your host file tools cannot reach the VM. To give the user a file you made there (a report, image, audio, video, spreadsheet or slides), call attach_file with its path once it is saved; it reports an error if the file is missing. A path inside the VM cannot be opened from chat, so do not paste one as a link. Use the computer tools for the desktop, accessibility and windows. Inspect the desktop state before acting, prefer accessibility targets over raw coordinates, and work carefully.",
   box:
     " You have your own cloud computer. In Chrome, prefer browser_snapshot with browser_click/browser_fill for semantic, trusted actions; use screenshot/click/type_text for visual or non-browser UI, open_url for navigation, and computer_exec for Linux tasks. Every action already returns the resulting screen, so don't follow it with screenshot; batch predictable pixel actions with computer_batch.",
   "box-agent": "",

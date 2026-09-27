@@ -367,6 +367,34 @@ const toolDefinitions = (externalRuntime: boolean) => [
     },
   },
   {
+    name: "vm_exec",
+    description:
+      "Run a shell command inside your own Local VM (as the desktop user, starting in /home/cua/workspace) and get its exit code, stdout and stderr back as text. Use this for all command-line work in the VM: pip install --user, running a script, generating or converting a file, checking that a file exists. Do not type commands into a terminal window and read screenshots: that is slow and unreliable. GUI programs you start appear on the VM desktop. For a long job raise timeout_seconds (default 60, at most 300). Only available while you have a Local VM desktop.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        command: { type: "string", description: "The shell command to run, for example: python3 make_report.py && ls -l report.pdf" },
+        timeout_seconds: { type: "integer", minimum: 1, maximum: 300, description: "How long it may run before it is stopped. Default 60." },
+      },
+      required: ["command"],
+    },
+  },
+  {
+    name: "attach_file",
+    description:
+      "Attach a finished file to the chat so the user can preview and download it: an image, video, audio clip, PDF, spreadsheet, slide deck or other document you made. Pass its path: a path inside your computer's /home/cua/workspace (for example /home/cua/workspace/report.pdf), or a file in your working folder. Do this instead of pasting a VM path as a link; a path inside a VM cannot be opened from chat. Supported: images (png, jpg, gif, webp), video (mp4, webm, mov), audio (mp3, m4a, aac, wav, ogg, opus, flac), pdf, Word/Excel/PowerPoint and OpenDocument files, and csv, tsv, txt, md, json, rtf. Up to 25 MB (images 10 MB). Finish writing the file first, then call this directly: it reports an error if the file is missing, so you do not need to list or open the folder to check.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: { type: "string", description: "The file's path, for example /home/cua/workspace/report.pdf." },
+        name: { type: "string", description: "Optional file name to show the user. Defaults to the file's own name." },
+      },
+      required: ["path"],
+    },
+  },
+  {
     name: "post_to_room",
     description:
       "Put one message into a shared room you belong to, for example when the user asks you to tell the team something. Get group_id from list_rooms. This posts and returns: no room member's turn starts, nobody replies, and nothing comes back except confirmation — so never use it to ask a question or hand out work (use ask_bot or delegate_bot for those). Post once, say it in full, and tell the user what you posted. Set attach_voice_note true to attach this turn's voice note. If a post is refused, do not retry it: say what you wanted to post in your reply instead.",
@@ -696,6 +724,35 @@ const toolDefinitions = (externalRuntime: boolean) => [
         },
       },
       required: ["reason"],
+    },
+  },
+  {
+    name: "propose_model",
+    description:
+      "Submit a user-requested switch of this bot's default engine and model. Use the exact instance and model ids the person named, or for a Chief the ids from the team-setup catalog. The card warns about capabilities the switch gains or loses; existing threads keep their current models." + PROPOSAL_OUTCOME,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        model_selection: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            instanceId: { type: "string", minLength: 1, description: "Engine instance id, for example codex or claude." },
+            model: { type: "string", minLength: 1, description: "Exact model id on that instance." },
+            effort: { type: "string", description: "Optional effort level the instance offers; omit for the engine default." },
+            variant: { type: "string", description: "Optional explicit model variant; choose this or effort, not both." },
+          },
+          required: ["instanceId", "model"],
+          description: "The new default selection.",
+        },
+        reason: { type: "string", minLength: 1, maxLength: 500, description: "One sentence the user will see explaining why." },
+        for_bot_id: {
+          type: "string",
+          description: "Chief of Staff only: the id of another bot in your section whose default model this changes. Omit to change your own.",
+        },
+      },
+      required: ["model_selection", "reason"],
     },
   },
   {

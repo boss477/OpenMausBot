@@ -14,20 +14,38 @@ registerHooks({
     if (url === mock) return { format: 'module', shortCircuit: true, source: `
       export * from ${JSON.stringify(actual)};
       import { SHARED_LOCAL_VM_TARGET } from ${JSON.stringify(actual)};
-      import { readFileSync, writeFileSync } from 'node:fs';
+      import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
       const file = ${JSON.stringify(state)};
       const read = () => JSON.parse(readFileSync(file, 'utf8'));
       export async function containerRuntimeStatus() { return { runtime: 'podman', daemonUp: true }; }
-      export async function containerComputerExists() { return !read().noContainers; }
+      export async function containerExec(target, command) {
+        writeFileSync(file + '.exec', JSON.stringify({ target, command }));
+        return { exitCode: 0, stdout: 'fixture command completed', stderr: '', timedOut: false };
+      }
+      export async function containerComputerExists(_runtime, target) {
+        const state = read();
+        return state.containers ? state.containers.includes(target.key) : !state.noContainers;
+      }
       export async function containerComputerStatus(_run, _platform, target = SHARED_LOCAL_VM_TARGET) {
         writeFileSync(file + '.entered', target.key);
         while (read().blocked) await new Promise(r => setTimeout(r, 30));
-        const ready = !read().failed;
-        return { runtime: 'podman', daemonUp: true, imagePresent: true, managed: true,
-          container: 'running', ready, problem: ready ? null : 'fixture desktop unavailable',
+        const missing = !(await containerComputerExists('podman', target));
+        const ready = !missing && !read().failed;
+        return { runtime: 'podman', daemonUp: true, image: true, create_supported: true, managed: !missing,
+          container: missing ? 'missing' : 'running', ready, problem: ready ? null : 'fixture desktop unavailable',
           container_name: target.containerName, target_key: target.key, workspace_path: target.workspaceDir };
       }
-      export async function containerComputerAction() { throw new Error('Unexpected container mutation in VM routing test'); }
+      export async function containerComputerAction(action, _run, _platform, target = SHARED_LOCAL_VM_TARGET) {
+        const state = read();
+        if (!state.containers || !['run', 'remove'].includes(action)) throw new Error('Unexpected container mutation in VM routing test');
+        if (action === 'run') {
+          mkdirSync(target.workspaceDir, { recursive: true });
+          state.containers.push(target.key);
+        } else state.containers = state.containers.filter(key => key !== target.key);
+        state.actions = [...(state.actions ?? []), { action, target: target.key }];
+        writeFileSync(file, JSON.stringify(state));
+        return containerComputerStatus(_run, _platform, target);
+      }
     ` };
     const result = nextLoad(url, context);
     if (url.endsWith('/local-vm-lease.ts')) {

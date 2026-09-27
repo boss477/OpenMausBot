@@ -226,6 +226,9 @@ const support: AcpSupport = {
   // A raw -m only changes the model within the saved provider. ACP switches
   // the complete route and confirms it before any prompt leaves OMB.
   spawnArgs: (config, turn) => ["--acp", ...qwenApprovalArgs(config.fullAuto, turn.approvalMode)],
+  // Qwen's live session/load returns its cached MCP clients, ignoring fresh
+  // credentials. Cold-load the same conversation when those inputs change.
+  restartOnMcpChange: true,
   selectModel: { configId: "model" },
   pickAuthMethod: () => null,
   authFailure: "continue",

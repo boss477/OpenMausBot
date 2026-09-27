@@ -42,6 +42,21 @@ import { customMcpServers,
 } from "./config.ts";
 
 describe("configuration boundaries", () => {
+  it("requires an explicit backup to opt into automatic recovery without reloading engines", () => {
+    expect(parseStoredConfig({}).automaticRecovery).toBeUndefined();
+    expect(parseConfigPatch({ automaticRecovery: { enabled: false } })).toEqual({ automaticRecovery: { enabled: false } });
+    const automaticRecovery = { enabled: true, backup: { instanceId: "codex", model: "backup", effort: "high" } };
+    expect(parseStoredConfig({ automaticRecovery }).automaticRecovery).toEqual(automaticRecovery);
+    expect(parseConfigPatch({ automaticRecovery }).automaticRecovery).toEqual(automaticRecovery);
+    expect(providerReloadKeys({ automaticRecovery })).toEqual([]);
+    const invalidSettings: JsonValue[] = [{ enabled: true }, { backup: { instanceId: "codex", model: "m" } },
+      { enabled: "true" }, { enabled: true, backup: { instanceId: "", model: "m" } },
+      { enabled: true, backup: { instanceId: "codex", model: "m", effort: "high", variant: "v" } },
+      { enabled: false, maxRetries: 2 }];
+    for (const invalid of invalidSettings) {
+      expect(() => parseConfigPatch({ automaticRecovery: invalid })).toThrow("automaticRecovery");
+    }
+  });
   it("accepts shared user context, including clearing, without reloading providers", () => {
     const profile = { aboutMe: "I prefer short answers.\nMy time zone is Europe/Berlin." };
     expect(parseConfigPatch({ profile })).toEqual({ profile });
@@ -471,6 +486,12 @@ describe("configuration boundaries", () => {
     expect(parseConfigPatch({ localVm: { mode: "per-bot", maxInstances: 4 } })).toEqual({
       localVm: { mode: "per-bot", maxInstances: 4 },
     });
+    expect(parseConfigPatch({ localVm: { maxInstances: 5 } })).toEqual({
+      localVm: { maxInstances: 5 },
+    });
+    expect(parseConfigPatch({ localVm: { mode: "per-bot", maxInstances: 8 } })).toEqual({
+      localVm: { mode: "per-bot", maxInstances: 8 },
+    });
     expect(localVmMode({ localVm: { mode: "per-bot" } })).toBe("per-bot");
     expect(localVmMaxInstances({ localVm: { maxInstances: 3 } })).toBe(3);
   });
@@ -534,7 +555,7 @@ describe("configuration boundaries", () => {
     expect(showToolCallsEnabled({ features: { showToolCalls: true } })).toBe(true);
   });
 
-  it.each([0, 1.5, 5, "2", null])("rejects an invalid per-bot VM limit: %j", (maxInstances) => {
+  it.each([0, 1.5, 9, "2", null])("rejects an invalid per-bot VM limit: %j", (maxInstances) => {
     expect(() => parseConfigPatch({ localVm: { maxInstances } })).toThrow("localVm.maxInstances");
   });
 
@@ -1013,6 +1034,19 @@ describe("credential env preference", () => {
     });
     expect(() => parseConfigPatch({ onboarding: { hintsSeen: ["x".repeat(61)] } })).toThrow();
     expect(() => parseConfigPatch({ onboarding: { unknown: true } })).toThrow();
+  });
+
+  it("replaces automatic recovery atomically, clears an omitted backup and keeps unrelated settings", () => {
+    const backup = { instanceId: "codex", model: "backup", effort: "high" as const };
+    saveConfig({ automaticRecovery: { enabled: true, backup }, profile: { name: "Recovery fixture" } });
+    expect(loadConfig().automaticRecovery).toEqual({ enabled: true, backup });
+    saveConfig({ automaticRecovery: { enabled: true, backup: { instanceId: "claude", model: "other" } } });
+    expect(loadConfig().automaticRecovery).toEqual({ enabled: true, backup: { instanceId: "claude", model: "other" } });
+    expect(() => saveConfig({ automaticRecovery: { enabled: true } })).toThrow();
+    expect(loadConfig().automaticRecovery?.backup?.model).toBe("other");
+    saveConfig({ automaticRecovery: { enabled: false } });
+    expect(loadConfig().automaticRecovery).toEqual({ enabled: false });
+    expect(loadConfig().profile).toEqual({ name: "Recovery fixture" });
   });
 
   it("persists a context change without losing the other context preferences", () => {

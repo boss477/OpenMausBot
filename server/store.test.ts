@@ -1041,6 +1041,27 @@ describe("Store", () => {
     expect(reloaded.projectBotForTask(bot.id, future.threadId)!.modelSelection).toEqual({ ...chosen, variant: "minimal" });
   });
 
+  it("applies one reviewed default-model change with applyTeamSetup's task stamping", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const first = bot.threadId;
+    const second = store.createTask(bot.id, "Second")!;
+    const pinned = { instanceId: "claude", model: "claude-opus-4-5" };
+    store.switchTaskModel(bot.id, first, pinned, false, false);
+    // A legacy thread with no selection of its own must not silently follow
+    // the new default: it is pinned to the previous one at apply time.
+    const legacy = store.bot(bot.id)!.tasks!.find((task) => task.threadId === second.threadId)!;
+    legacy.modelSelection = undefined;
+    const next = { instanceId: "codex", model: "gpt-5-codex" };
+    expect(store.applyModelDefault(bot.id, next)?.modelSelection).toEqual(next);
+    expect(store.projectBotForTask(bot.id, first)!.modelSelection).toEqual(pinned);
+    expect(store.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(selection());
+    const reloaded = new Store(selection);
+    expect(reloaded.bot(bot.id)!.modelSelection).toEqual(next);
+    expect(reloaded.projectBotForTask(bot.id, first)!.modelSelection).toEqual(pinned);
+    expect(reloaded.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(selection());
+  });
+
   it("keeps one persisted Chief of Staff per section and supports handoff", () => {
     const store = new Store(selection);
     const first = store.createBot({ section: "Work" });

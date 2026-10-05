@@ -43,7 +43,7 @@ const __APP_VERSION__: string;
     };
     dictation: {
       available: boolean;
-      engine: "apple-speech" | "none";
+      engine: "apple-speech" | "universal" | "none";
       onDevice: boolean;
       reasonCode?: string;
     };

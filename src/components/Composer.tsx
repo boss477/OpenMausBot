@@ -1181,7 +1181,7 @@ export function Composer({
             <Square size={14} className="fill-current" />
           </button>
         )}
-        {!locked && !busy && !hasContent && capabilities.dictation.available && (
+        {!locked && !busy && (!hasContent || recording) && capabilities.dictation.available && (
           <button
             onClick={toggleMic}
             aria-label={recording ? t("composer.dictation.stop") : t("composer.dictation.start")}

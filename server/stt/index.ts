@@ -23,6 +23,20 @@ export const DEFAULT_MODELS: Record<SttProviderId, string> = {
 const OPENAI_API = (process.env.OMB_OPENAI_STT_API || "https://api.openai.com/v1").replace(/\/+$/, "");
 const GROQ_API = (process.env.OMB_GROQ_STT_API || "https://api.groq.com/openai/v1").replace(/\/+$/, "");
 
+function publicBaseUrl(value: string | undefined): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, value.endsWith("/") ? "/" : "");
+  } catch {
+    return "";
+  }
+}
+
 export class NoSttConfigured extends Error {
   readonly reason: "provider" | "key" | "server";
 
@@ -53,7 +67,7 @@ export function sttReady(cfg: AppConfig): boolean {
 }
 
 /** What Settings and the call button need. Keys are reported as booleans
- * only; baseUrl/model/language are settings, not secrets. */
+ * only; the server URL is sanitized before it reaches client-scoped config. */
 export function describeStt(cfg: AppConfig) {
   const provider = sttProvider(cfg);
   return {
@@ -62,7 +76,7 @@ export function describeStt(cfg: AppConfig) {
     openaiConfigured: Boolean(cfg.stt?.openaiKey),
     groqConfigured: Boolean(cfg.stt?.groqKey),
     xaiConfigured: Boolean(cfg.xai?.key),
-    baseUrl: cfg.stt?.baseUrl ?? "",
+    baseUrl: publicBaseUrl(cfg.stt?.baseUrl),
     model: cfg.stt?.model ?? "",
     language: cfg.stt?.language ?? "",
     // Interim (partial) transcripts re-send the growing utterance about once

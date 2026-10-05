@@ -105,6 +105,15 @@ describe("configuration", () => {
     expect(JSON.parse(text)).toMatchObject({ provider: "groq", ready: true, groqConfigured: true, interim: false });
   });
 
+  it("sanitizes local server URLs before describing them", async () => {
+    const { describeStt } = await stt();
+    expect(
+      describeStt({
+        stt: { provider: "local", baseUrl: "http://user:pass@127.0.0.1:8000/v1?token=secret#fragment" },
+      }).baseUrl,
+    ).toBe("http://127.0.0.1:8000/v1");
+  });
+
   it("only offers interim transcripts for a local server", async () => {
     const { describeStt } = await stt();
     expect(describeStt({ stt: { provider: "local", baseUrl: "http://x" } }).interim).toBe(true);

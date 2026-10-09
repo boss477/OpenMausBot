@@ -12,9 +12,14 @@ export function useSpeechCapabilities() {
   const desktop = useDesktopCapabilities();
   const stt = state.config?.stt;
   useEffect(() => setSttStatus(stt), [stt]);
-  const capabilities = useMemo(
-    () => ({ ...desktop.capabilities, dictation: effectiveDictation(desktop.capabilities.dictation, stt) }),
-    [desktop.capabilities, stt],
-  );
+  const capabilities = useMemo(() => {
+    // Capability discovery is intentionally nullable while the desktop
+    // preload is still loading (and in its server-rendered test harness).
+    if (!desktop.capabilities) return desktop.capabilities;
+    return {
+      ...desktop.capabilities,
+      dictation: effectiveDictation(desktop.capabilities.dictation, stt),
+    };
+  }, [desktop.capabilities, stt]);
   return { ...desktop, capabilities };
 }

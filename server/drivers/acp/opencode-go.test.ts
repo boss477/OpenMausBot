@@ -18,15 +18,14 @@ import {
   openCodeOwnedDirectories,
   openCodeProviderKeysAllowed,
   openMausOwnsWorkingFolder,
-  OPENCODE_PROVIDER_ENV,
   parseOpenCodeModelsOutput,
   preferredOpenCodeModel,
   resetOpenCodeModelCache,
-  setOpenCodeOwnProviderKeys,
   setOpenCodeProviderKeyPolicy,
 } from "./opencode-go.ts";
 import { ATTACHMENTS_DIR } from "../../attachments.ts";
 import { cloudHomeConfigured } from "../../cloud-home.ts";
+import { OPENCODE_PROVIDER_ENV } from "../../config.ts";
 import { hostedWorkspaceConfigured } from "../../enterprise.ts";
 import { TASK_WORKSPACES_DIR, workspaceDir } from "../../workspace.ts";
 import type { ModelCatalog, ProviderInstance, SendTurnInput } from "../../contracts.ts";
@@ -432,31 +431,31 @@ describe("OpenCode catalog", () => {
     expect(source).toContain("openCodeOrganisationManaged = () => managedPolicy.current() !== null || managedDesktop.enrolled();");
   });
 
-  it("keeps provider keys out on a Cloud home or a managed desktop", async () => {
+  // The policy is about where a key comes from. One riding along in the
+  // server's own environment (the operator's) stays out; one in OpenCode's
+  // instance environment was put there on purpose (config.ts
+  // injectedEnvironment), as claude.ts treats the workspace Anthropic key.
+  it("keeps the server's own provider keys out on a Cloud home or a managed desktop", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "omb-opencode-managed-"));
     setOpenCodeProviderKeyPolicy(() => false);
+    for (const key of OPENCODE_PROVIDER_ENV) vi.stubEnv(key, `operator-${key}`);
     try {
       const dump = join(scratch, "env.json");
       const driver = createOpenCodeDriver(async () => catalog("opencode-go/minimax-m3"));
       const instance = await driver.create({
         instanceId: "opencode-managed",
         displayName: "OpenCode",
-        environment: {
-          OPENCODE_API_KEY: "secret-value",
-          ...Object.fromEntries(OPENCODE_PROVIDER_ENV.map((key) => [key, `operator-${key}`])),
-          FAKE_ACP_DUMP: dump,
-        },
+        environment: { OPENCODE_API_KEY: "secret-value", FAKE_ACP_DUMP: dump },
         enabled: true,
         config: { cli: FAKE_CLI, fullAuto: false },
       });
       await instance.snapshot();
       const child = JSON.parse(readFileSync(dump, "utf8")) as { env: Record<string, string> };
       expect(child.env.OPENCODE_API_KEY).toBe("secret-value");
-      expect(child.env.OPENAI_API_KEY).toBeUndefined();
-      expect(child.env.ANTHROPIC_API_KEY).toBeUndefined();
-      expect(child.env.GEMINI_API_KEY).toBeUndefined();
+      for (const key of OPENCODE_PROVIDER_ENV) expect(child.env[key], key).toBeUndefined();
       await instance.dispose();
     } finally {
+      vi.unstubAllEnvs();
       setOpenCodeProviderKeyPolicy(() => !cloudHomeConfigured() && !hostedWorkspaceConfigured());
       await removeTempDir(scratch);
     }
@@ -464,12 +463,12 @@ describe("OpenCode catalog", () => {
 
   // On a Cloud the owner has no shell to export a key in: Settings saves it
   // for OpenCode (config.ts openCodeProviderKeys), and the server hands it
-  // over in the instance environment. That exact value goes through; the
-  // server's own key under the same name still does not.
+  // over in the instance environment. Those names go through; every other
+  // provider key the server's own environment holds still does not.
   it("lets the owner's saved provider keys through on a Cloud home, and only those", async () => {
     const scratch = mkdtempSync(join(tmpdir(), "omb-opencode-own-keys-"));
     setOpenCodeProviderKeyPolicy(() => false);
-    setOpenCodeOwnProviderKeys(() => ({ ANTHROPIC_API_KEY: "owner-anthropic", GEMINI_API_KEY: "owner-gemini", VENICE_API_KEY: "owner-venice" }));
+    for (const key of OPENCODE_PROVIDER_ENV) vi.stubEnv(key, `operator-${key}`);
     try {
       const dump = join(scratch, "env.json");
       const driver = createOpenCodeDriver(async () => catalog("opencode-go/minimax-m3"));
@@ -479,10 +478,8 @@ describe("OpenCode catalog", () => {
         environment: {
           ANTHROPIC_API_KEY: "owner-anthropic",
           VENICE_API_KEY: "owner-venice",
-          // Saved, but this instance holds the server's value, not the saved one.
-          GEMINI_API_KEY: "operator-gemini",
-          // Never saved: the server's own.
-          OPENAI_API_KEY: "operator-openai",
+          // Saved with the very value the server also holds: still saved.
+          GEMINI_API_KEY: "operator-GEMINI_API_KEY",
           FAKE_ACP_DUMP: dump,
         },
         enabled: true,
@@ -492,22 +489,16 @@ describe("OpenCode catalog", () => {
       const child = JSON.parse(readFileSync(dump, "utf8")) as { env: Record<string, string> };
       expect(child.env.ANTHROPIC_API_KEY).toBe("owner-anthropic");
       expect(child.env.VENICE_API_KEY).toBe("owner-venice");
-      expect(child.env.GEMINI_API_KEY).toBeUndefined();
-      expect(child.env.OPENAI_API_KEY).toBeUndefined();
+      expect(child.env.GEMINI_API_KEY).toBe("operator-GEMINI_API_KEY");
+      for (const key of OPENCODE_PROVIDER_ENV.filter((name) => name !== "ANTHROPIC_API_KEY" && name !== "GEMINI_API_KEY")) {
+        expect(child.env[key], key).toBeUndefined();
+      }
       await instance.dispose();
     } finally {
+      vi.unstubAllEnvs();
       setOpenCodeProviderKeyPolicy(() => !cloudHomeConfigured() && !hostedWorkspaceConfigured());
-      setOpenCodeOwnProviderKeys(() => ({}));
       await removeTempDir(scratch);
     }
-  });
-
-  it("wires the owner's saved keys in index.ts before the first catalog probe", () => {
-    const source = readFileSync(new URL("../../index.ts", import.meta.url), "utf8").replace(/\r\n/g, "\n");
-    const wired = source.indexOf("setOpenCodeOwnProviderKeys(() => openCodeProviderKeys(cfg));");
-    expect(wired).toBeGreaterThan(0);
-    expect(source.indexOf("await registry.load(providerConfigs(), decorateHostedProvider);")).toBeGreaterThan(wired);
-    expect(source.match(/setOpenCodeOwnProviderKeys\(/g)).toHaveLength(1);
   });
 });
 

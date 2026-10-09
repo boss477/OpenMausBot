@@ -9,8 +9,10 @@ same runtime as the other ACP engines.
 
 1. Install the official CLI using the
    [OpenCode installation guide](https://opencode.ai/docs/).
-2. Connect the providers you want in the OpenCode app, or run
-   `opencode auth login`.
+2. Connect the providers you want in the OpenCode app, run
+   `opencode auth login`, or save the provider's key in OpenMausBot under
+   Settings → API keys → **Keys for other OpenCode providers**. On an OMB
+   Cloud, which has no terminal, save the key there.
 3. Restart OpenMausBot. It reuses OpenCode's existing connections and model
    configuration automatically.
 
@@ -19,7 +21,7 @@ For OpenRouter, Fireworks AI, DeepSeek, Cline or your own provider, see
 
 OpenCode includes anonymous free models. A Zen, Go, OpenRouter, or other
 provider connection expands the catalog according to the installed CLI. An
-OpenCode API key can optionally be stored under Settings → Connections. It is
+OpenCode API key can optionally be stored under Settings → API keys. It is
 write-only and injected as `OPENCODE_API_KEY` only into the OpenCode child
 process; it is not sent to the renderer, logs, analytics, snapshots, error
 messages, or command arguments.

@@ -458,9 +458,6 @@ export function resetOpenCodeModelCache() {
  * from the Go-only name. */
 export const resetOpenCodeGoModelCache = resetOpenCodeModelCache;
 
-/** The names live in config.ts, beside the keys the owner saves for OpenCode. */
-export { OPENCODE_PROVIDER_ENV };
-
 /** Whether OpenCode may read provider keys from the server's own
  * environment. Only when that environment is the person's own shell: not on a
  * Cloud home, a hosted team workspace or an organisation-managed desktop, and
@@ -488,23 +485,19 @@ export function setOpenCodeProviderKeyPolicy(allowed: () => boolean): void {
   providerKeysAllowed = allowed;
 }
 
-let ownProviderKeys = (): Readonly<Record<string, string>> => ({});
-
-/** The keys the owner saved for OpenCode in Settings (config.ts
- * openCodeProviderKeys). The server sets this beside the policy above. */
-export function setOpenCodeOwnProviderKeys(keys: () => Readonly<Record<string, string>>): void {
-  ownProviderKeys = keys;
-}
-
-function withholdProviderKeysWhenManaged(env: Record<string, string | undefined>): void {
+/** Where OpenCode may not read the server's own environment, a provider key
+ * reaches it only through its instance environment: a key the owner saved
+ * in Settings (config.ts injectedEnvironment), which is theirs on any
+ * server. The same name riding along in the server's env stays out. */
+function withholdProviderKeysWhenManaged(
+  env: Record<string, string | undefined>,
+  _config: unknown,
+  _instanceId: string,
+  instanceEnvironment: Readonly<Record<string, string>>,
+): void {
   if (providerKeysAllowed()) return;
-  const own = ownProviderKeys();
   for (const key of OPENCODE_PROVIDER_ENV) {
-    // A key the owner saved for OpenCode in Settings is theirs to use on any
-    // server. Only that exact value: the server's own key under the same
-    // name still stays out.
-    if (own[key] !== undefined && env[key] === own[key]) continue;
-    delete env[key];
+    if (!Object.hasOwn(instanceEnvironment, key)) delete env[key];
   }
 }
 

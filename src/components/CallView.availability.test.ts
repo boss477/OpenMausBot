@@ -34,17 +34,21 @@ describe("call capability guidance", () => {
     }), true)).toBeNull();
   });
 
-  it("sends a hosted workspace view to the native workspace menu", () => {
-    expect(callCapabilityHelp(capabilities({
+  // The Mac app on a server's page (My Cloud): taking turns works on This
+  // computer, but the help sends nobody there. Leaving would leave the bot
+  // being called; the call on this page is Live.
+  it("says where taking turns works on a server's page in the Mac app, with no trip there", () => {
+    const help = callCapabilityHelp(capabilities({
       available: false,
       engine: "none",
       onDevice: false,
       reasonCode: "remote-server",
-    }), false)).toEqual({
-      label: "Calls are available on This computer",
-      reason: "You're viewing a server. Calls use the microphone and on-device speech recognition on your Mac.",
-      action: "choose-local-workspace",
+    }), false);
+    expect(help).toEqual({
+      label: "Calls where you take turns work on This computer",
+      reason: "They listen with your Mac's own speech recognition, which only This computer can use.",
     });
+    expect(help).not.toHaveProperty("action");
   });
 
   // Only a Mac's own window can take turns. Elsewhere This computer can't

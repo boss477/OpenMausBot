@@ -55,6 +55,7 @@ vi.mock("./MenuMotion", async (importOriginal) => ({
 }));
 
 const { CallButton, CallTargetButton } = await import("./CallView");
+const { configureLiveMedia, liveMedia, resetLiveMedia } = await import("@/lib/live-call-media");
 
 const bot: Bot = {
   id: "pepper", threadId: "t", name: "Pepper", title: "", description: "", color: "green",
@@ -97,7 +98,10 @@ beforeEach(() => {
   fixture.dispatch.mockClear();
   vi.stubGlobal("window", { ogb: { speechStart: () => {} } });
 });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => {
+  resetLiveMedia();
+  vi.unstubAllGlobals();
+});
 
 describe("composer call button", () => {
   it("is a Send-sized filled circle with a waveform, labelled for the bot", () => {
@@ -142,28 +146,35 @@ describe("composer call button", () => {
     expect(fixture.startCall).not.toHaveBeenCalled();
   });
 
-  it("keeps the same availability rules on devices that cannot call", () => {
+  // A device that can't take turns makes Live calls: the button is the Live
+  // call, never a take-turns call that can't start.
+  it("is a Live call on a device that can't take turns", () => {
     fixture.dictation = false;
-    const { button } = render();
-    expect(button.props["aria-label"]).toBe("Calls where you take turns need the Mac app");
+    const getUserMedia = vi.fn(() => new Promise<MediaStream>(() => {}));
+    configureLiveMedia({ getUserMedia });
+    const { html, button } = render();
+    expect(button.props["aria-label"]).toBe("Live call with Pepper");
+    expect(html).not.toContain("bg-warning");
     button.props.onClick!();
-    expect(fixture.startCall).not.toHaveBeenCalled();
+    // a Live call: the microphone first, then the call bar; no overlay
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(liveMedia()).toMatchObject({ phase: "starting", botId: "pepper" });
+    expect(fixture.track).toHaveBeenCalledWith("call_started", { driver: "codex", mode: "live" });
   });
 
-  // A Windows desktop showing a server (its Cloud): This computer can't take
-  // turns either, so the help offers a Live call and no trip there.
-  it("offers only a Live call on a server's page in the Windows app", () => {
+  // A server's page (My Cloud) in either app: the call is Live, with no help
+  // card and no trip to This computer, which would leave the bot.
+  it("is a Live call on a server's page in the Windows app and the Mac app alike", () => {
     fixture.dictation = false;
     fixture.serverPage = true;
-    fixture.host = "win32";
-    fixture.helpShown = true;
-    const windows = render().html;
-    expect(windows).toContain("Start a Live call instead");
-    expect(windows).not.toContain("Choose This computer");
-
-    // the Mac app still sends a server's page to This computer, which can
-    fixture.host = "darwin";
-    expect(render().html).toContain("Choose This computer");
+    for (const host of ["win32", "darwin"] as const) {
+      fixture.host = host;
+      const { html, button } = render();
+      expect(button.props["aria-label"], host).toBe("Live call with Pepper");
+      expect(html, host).not.toContain("bg-warning");
+      expect(html, host).not.toContain("Call unavailable");
+      expect(html, host).not.toContain("Choose This computer");
+    }
   });
 
   it("leaves the header placement (rooms) as it was", () => {

@@ -16,7 +16,8 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname, isAbsolute, normalize } from "node:path";
 
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
-import { writeFileAtomic } from "../atomic.ts";
+import { openStartupModelCatalog, writeStartupModelCache } from "../startup-model-catalog.ts";
+import { writeFileAtomic, writeFileAtomicIfChanged } from "../atomic.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../resume-recovery.ts";
@@ -732,6 +733,9 @@ export async function createPermissionBroker(opts: {
   let boundPath = opts.socketPaths[0] ?? "";
   const connectionHandler = (conn: import("node:net").Socket) => {
     conn.on("error", () => {});
+    // An ask carries the whole tool input (a Write's file content), so one
+    // line spans many reads. Decode as a stream so no character is split.
+    conn.setEncoding("utf8");
     let buf = "";
     conn.on("data", (chunk) => {
       buf += chunk;
@@ -1061,8 +1065,10 @@ function recordCostState(sessionId: string, state: ClaudeCostSnapshot): void {
   history[sessionId] = states;
   const ids = Object.keys(history);
   for (const id of ids.slice(0, Math.max(0, ids.length - COST_HISTORY_SESSIONS))) delete history[id];
+  // Written after every turn, so not fsynced: what a power cut could lose is
+  // the same thing a failed write already gives up (below).
   try {
-    writeFileAtomic(COST_HISTORY_FILE, JSON.stringify(history), { mode: 0o600 });
+    writeFileAtomic(COST_HISTORY_FILE, JSON.stringify(history), { mode: 0o600, durable: false });
   } catch {
     // a lost state only means a later resume keeps its whole figure
   }
@@ -1172,8 +1178,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       } catch {
         // Keep the last usable catalog when settings.json is unreadable.
       }
+      try { writeStartupModelCache(instanceId, models); } catch { /* derived cache */ }
     };
-    await refreshModels();
+    // A later start serves the saved list and refreshes behind listen.
+    // The first run still waits so the seeded default model does not change.
+    const startupModelRefresh = config.managed ? null : (await openStartupModelCatalog({
+      instanceId,
+      use: (catalog) => { models = catalog; },
+      current: () => models,
+      refresh: refreshModels,
+    }))?.pending ?? null;
 
     // The installed CLI's version as snapshot() last read it, so a flag the
     // CLI does not know is never passed to it (CLAUDE_FLAG_FLOORS). The
@@ -1199,6 +1213,24 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           resolve(err ? null : stdout.trim() || null),
         );
       });
+    // The --help read while it runs: snapshots that overlap (the server's
+    // read at start and the app's first one) share it.
+    let helpRead: { version: string; done: Promise<void> } | null = null;
+    const readCliHelp = (version: string, env: NodeJS.ProcessEnv): Promise<void> => {
+      if (helpRead?.version === version) return helpRead.done;
+      const read = {
+        version,
+        done: new Promise<string | null>((resolve) => {
+          execCli(config.cli, ["--help"], { timeout: 8000, env }, (err, stdout) => resolve(err ? null : stdout));
+        }).then((help) => {
+          cliHasAutocompact = help === null ? null : /^\s*--autocompact\b/m.test(help);
+          cliHelpVersion = version;
+          if (helpRead === read) helpRead = null;
+        }),
+      };
+      helpRead = read;
+      return read.done;
+    };
     const listeners = new Set<RuntimeEventListener>();
     // one active turn per thread; a second send while busy is a caller bug
     const active = new Map<string, { stop: () => void; turnId: string; broker?: Awaited<ReturnType<typeof createPermissionBroker>> }>();
@@ -1355,6 +1387,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     const retryState = new Map<string, { attempt: number; cancelled: boolean; rebuilt?: boolean }>();
 
     const sendTurn = async (turn: SendTurnInput, logicalTurnId?: string) => {
+      if (startupModelRefresh) await startupModelRefresh;
       turn = { ...turn, toolScope: assertToolScopeSupported(DRIVER_KIND, turn.toolScope) };
       if (config.managedModels && (!turn.model || !config.managedModels.includes(turn.model))) throw new Error("This model is not assigned to this workspace.");
       if (config.requireApiKey && !input.environment.ANTHROPIC_API_KEY) throw new Error(NO_ANTHROPIC_KEY);
@@ -1554,6 +1587,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // A remote entry ({type, url, headers}) is already in the CLI's own
       // shape and the CLI connects to it itself; header values ride in the
       // 0600 config file like every other credential here.
+      // Claude Code is the one engine that keeps its own connection: every
+      // other engine reaches URL servers through OpenMausBot's remote proxy
+      // (mcp-remote-proxy.ts), whose minimal handshake strict servers
+      // accept. Claude Code 2.1.292 sends only fields the MCP spec defines
+      // (2025-11-25: roots, elicitation.form/url, clientInfo), none of the
+      // rmcp extensions (schemaValidation) Codex and Grok link, and a strict
+      // server that knows the current spec accepts it (captured Oct 8 2026
+      // against testing/fake-http-mcp-server.ts `strictInitialize`). Its
+      // native transport also keeps Claude Code's own MCP tool search,
+      // which defers big catalogs instead of loading them up front.
       // Bot-owned servers, gated below: they are the ones that answer for a
       // machine rather than for a context window.
       const botOwned = new Set<string>();
@@ -1620,14 +1663,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         ? readClaudeAuthSettings(env, input.environment) : {};
       // Harness hooks (item 0.2): one helper command for the events the
       // harness observes. The helper reads its bearer from a per-thread file
-      // the harness rewrites every turn, so a long-lived CLI process never
+      // the harness refreshes every turn, so a long-lived CLI process never
       // presents a stale token. Registered through the same private
       // --settings file as the auth override; both are 0600 and per launch.
       const hooks = turn.integrations?.hooks;
       const hookTokenPath = hooks ? hookTokenFile(threadId, botId) : null;
       if (hooks && hookTokenPath) {
         mkdirSync(dirname(hookTokenPath), { recursive: true, mode: 0o700 });
-        writeFileAtomic(hookTokenPath, hooks.token, { mode: 0o600 });
+        // The bearer is usually the same as last turn, and it only lives in
+        // this process's memory, so a restart invalidates the file anyway:
+        // skip identical bytes and the fsync. A rotated bearer differs from
+        // what is on disk, so it is always written before the CLI launches.
+        writeFileAtomicIfChanged(hookTokenPath, hooks.token, { mode: 0o600, durable: false });
         env.OMB_HOOK_URL = hooks.url;
         env.OMB_HOOK_TOKEN_FILE = hookTokenPath;
         env.OMB_HOOK_NODE = process.execPath;
@@ -2476,13 +2523,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (!version) return { state: "unavailable", reason: `\`${config.cli}\` CLI not found` };
       cliVersion = parseClaudeCliVersion(version);
       cliVersionChecked = true;
-      if (version !== cliHelpVersion) {
-        const help = await new Promise<string | null>((resolve) => {
-          execCli(config.cli, ["--help"], { timeout: 8000, env }, (err, stdout) => resolve(err ? null : stdout));
-        });
-        cliHasAutocompact = help === null ? null : /^\s*--autocompact\b/m.test(help);
-        cliHelpVersion = version;
-      }
+      if (version !== cliHelpVersion) await readCliHelp(version, env);
       const update = claudeCliUpdate(version, config.cli);
       const warning = claudeInheritWarning(env);
       if (config.requireApiKey) {
@@ -2595,6 +2636,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         return models;
       },
       refreshModels,
+      ...(startupModelRefresh ? { startupModelRefresh } : {}),
       snapshot,
       startAuthentication: () => login.start(),
       getAuthentication: (flowId) => login.get(flowId),
